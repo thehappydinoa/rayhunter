@@ -10,7 +10,8 @@ At a high level, we have:
 * A Rust binary `rayhunter-daemon` (`./daemon/`) that runs on the device, and bundles the frontend.
 * A Rust binary `installer` (`./installer`) that runs on the computer and bundles `rayhunter-daemon`.
 
-It's recommended to work either on Mac/Linux, or WSL on Windows.
+It's recommended to work either on Mac/Linux, natively on Windows (see
+[Building on Windows](#building-on-windows) below), or WSL on Windows.
 
 ## Building frontend and backend
 
@@ -26,6 +27,40 @@ Then you can build everything with:
 ./scripts/build-dev.sh
 ./scripts/install-dev.sh orbic  # replace 'orbic' with your device type
 ```
+
+## Building on Windows
+
+Rayhunter can be built and installed natively on Windows (no WSL required)
+using the PowerShell equivalents of the build scripts:
+
+```powershell
+.\scripts\build-dev.ps1
+.\scripts\install-dev.ps1 orbic  # replace 'orbic' with your device type
+```
+
+Prerequisites:
+
+- [Rust](https://www.rust-lang.org/tools/install) via rustup
+- [Node.js/npm](https://docs.npmjs.com/downloading-and-installing-node-js-and-npm)
+- A C compiler for the installer's bundled libusb:
+  - with the MSVC host toolchain (rustup's default on Windows), install the
+    [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/)
+    (which rustup prompts for anyway);
+  - with the GNU host toolchain, install MSYS2's
+    `mingw-w64-x86_64-gcc` package and put `C:\msys64\mingw64\bin` on `PATH`.
+
+The daemon and rootshell cross-compile to ARM with Rust's built-in `rust-lld`
+linker, so no ARM C cross-compiler is needed. The WiFi tools
+(`wpa_supplicant`, `wpa_cli`, `iw`) cannot be built natively on Windows; the
+build script skips them and the installer will warn if a device needs them.
+Build them in WSL, or use a release artifact, if you need the WiFi client
+feature.
+
+Known pitfall: Git for Windows ships its own `mingw64\bin` with older copies
+of gcc's dependency DLLs. If it precedes the MSYS2 toolchain on `PATH`, gcc's
+`cc1.exe` fails with `STATUS_ENTRYPOINT_NOT_FOUND` and cc-rs reports an opaque
+"Compiler family detection failed" error. The PowerShell scripts work around
+this automatically by prepending gcc's own directory to `PATH`.
 
 ## Running the daemon on your PC
 
