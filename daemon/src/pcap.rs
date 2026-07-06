@@ -13,9 +13,80 @@ use log::error;
 use rayhunter::gsmtap::parser as gsmtap_parser;
 use rayhunter::pcap::{GpsPoint, GsmtapPcapWriter};
 use rayhunter::qmdl::QmdlMessageReader;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
-use tokio::io::{AsyncRead, AsyncSeek, AsyncWrite, duplex};
+use std::task::{Context, Poll};
+use std::time::Duration;
+use tokio::fs::File;
+use tokio::io::{AsyncRead, AsyncSeek, AsyncWrite, ReadBuf, duplex};
+use tokio::time::Sleep;
 use tokio_util::io::ReaderStream;
+use tokio_util::sync::CancellationToken;
+
+/// How often the live PCAP stream re-checks the growing QMDL file for new
+/// data once it's caught up with the end of the file.
+const FOLLOW_POLL_INTERVAL: Duration = Duration::from_millis(250);
+
+/// Reader for a QMDL file that's still being recorded. Reaching the end of
+/// the file means "no new data yet", not end-of-stream, so instead of
+/// reporting EOF this waits and retries until `stop` is cancelled. This has
+/// to wrap the raw file rather than the parsed message stream: QMDL files
+/// are gzipped, and both the decoder's stream state and QmdlAsyncReader's
+/// sticky EOF handling mean the layers above can't resume after seeing EOF.
+struct FollowFile {
+    file: File,
+    stop: CancellationToken,
+    sleep: Option<Pin<Box<Sleep>>>,
+}
+
+impl FollowFile {
+    fn new(file: File, stop: CancellationToken) -> Self {
+        FollowFile {
+            file,
+            stop,
+            sleep: None,
+        }
+    }
+}
+
+impl AsyncRead for FollowFile {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let this = self.get_mut();
+        loop {
+            if let Some(sleep) = this.sleep.as_mut() {
+                match sleep.as_mut().poll(cx) {
+                    Poll::Ready(()) => this.sleep = None,
+                    Poll::Pending => return Poll::Pending,
+                }
+            }
+            let filled_before = buf.filled().len();
+            match Pin::new(&mut this.file).poll_read(cx, buf) {
+                Poll::Ready(Ok(())) if buf.filled().len() == filled_before => {
+                    if this.stop.is_cancelled() {
+                        return Poll::Ready(Ok(()));
+                    }
+                    this.sleep = Some(Box::pin(tokio::time::sleep(FOLLOW_POLL_INTERVAL)));
+                }
+                res => return res,
+            }
+        }
+    }
+}
+
+impl AsyncSeek for FollowFile {
+    fn start_seek(self: Pin<&mut Self>, position: std::io::SeekFrom) -> std::io::Result<()> {
+        Pin::new(&mut self.get_mut().file).start_seek(position)
+    }
+
+    fn poll_complete(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<u64>> {
+        Pin::new(&mut self.get_mut().file).poll_complete(cx)
+    }
+}
 
 #[cfg_attr(feature = "apidocs", utoipa::path(
     get,
@@ -27,10 +98,10 @@ use tokio_util::io::ReaderStream;
         (status = StatusCode::SERVICE_UNAVAILABLE, description = "QMDL file is empty")
     ),
     params(
-        ("name" = String, Path, description = "QMDL filename to convert and download")
+        ("name" = String, Path, description = "QMDL filename to convert and download, or \"live\" to stream the current recording as it grows")
     ),
     summary = "Download a PCAP file",
-    description = "Stream a PCAP file to a client in chunks by converting the QMDL data for file {name} written so far."
+    description = "Stream a PCAP file to a client in chunks by converting the QMDL data for file {name} written so far. Passing \"live\" as the name follows the currently-active recording: the response keeps streaming new packets as they're captured, ending when the recording stops."
 ))]
 pub async fn get_pcap(
     State(state): State<Arc<ServerState>>,
@@ -40,33 +111,78 @@ pub async fn get_pcap(
     if qmdl_name.ends_with("pcapng") {
         qmdl_name = qmdl_name.trim_end_matches(".pcapng").to_string();
     }
-    let (entry_index, entry) = qmdl_store.entry_for_name(&qmdl_name).ok_or((
-        StatusCode::NOT_FOUND,
-        format!("couldn't find manifest entry with name {qmdl_name}"),
-    ))?;
+    let follow = qmdl_name == "live";
+    let (entry_index, entry) = if follow {
+        qmdl_store.get_current_entry().ok_or((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "No QMDL data's being recorded, try starting a new recording!".to_string(),
+        ))?
+    } else {
+        qmdl_store.entry_for_name(&qmdl_name).ok_or((
+            StatusCode::NOT_FOUND,
+            format!("couldn't find manifest entry with name {qmdl_name}"),
+        ))?
+    };
     if entry.qmdl_size_bytes == 0 {
         return Err((
             StatusCode::SERVICE_UNAVAILABLE,
             "QMDL file is empty, try again in a bit!".to_string(),
         ));
     }
+    let entry_name = entry.name.clone();
     let qmdl_file = qmdl_store
         .open_file(entry_index, FileKind::Qmdl)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e:?}")))?
         .ok_or((StatusCode::NOT_FOUND, "QMDL file not found".to_string()))?;
-    let qmdl_reader = QmdlMessageReader::new(qmdl_file)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e:?}")))?;
     let (reader, writer) = duplex(1024);
     let gps_records = load_gps_records_for_entry(&state, entry_index).await;
     drop(qmdl_store);
 
-    tokio::spawn(async move {
-        if let Err(e) = generate_pcap_data(writer, qmdl_reader, gps_records).await {
-            error!("failed to generate PCAP: {e:?}");
-        }
-    });
+    if follow {
+        let stop = CancellationToken::new();
+        let qmdl_reader = QmdlMessageReader::new(FollowFile::new(qmdl_file, stop.clone()))
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e:?}")))?;
+
+        // Watch for the recording we're following being stopped out from
+        // under us (deleted, or rotated by a stop/start) and unstick the
+        // FollowFile if so. A normal stop also ends the stream on its own,
+        // since closing the QmdlWriter writes the gzip footer.
+        let store_lock = state.qmdl_store_lock.clone();
+        let watcher_stop = stop.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = watcher_stop.cancelled() => break,
+                    _ = tokio::time::sleep(Duration::from_secs(1)) => {
+                        if !store_lock.read().await.is_current_entry(&entry_name) {
+                            watcher_stop.cancel();
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+
+        tokio::spawn(async move {
+            // also stops the watcher once we're done, e.g. if the client
+            // disconnected
+            let _stop_guard = stop.drop_guard();
+            if let Err(e) = generate_pcap_data(writer, qmdl_reader, gps_records).await {
+                error!("failed to generate live PCAP: {e:?}");
+            }
+        });
+    } else {
+        let qmdl_reader = QmdlMessageReader::new(qmdl_file)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e:?}")))?;
+        tokio::spawn(async move {
+            if let Err(e) = generate_pcap_data(writer, qmdl_reader, gps_records).await {
+                error!("failed to generate PCAP: {e:?}");
+            }
+        });
+    }
 
     let headers = [(CONTENT_TYPE, "application/vnd.tcpdump.pcap")];
     let body = Body::from_stream(ReaderStream::new(reader));
@@ -164,6 +280,59 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[tokio::test(start_paused = true)]
+    async fn test_follow_file_reads_data_appended_after_eof() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.qmdl");
+        tokio::fs::write(&path, b"hello").await.unwrap();
+
+        let stop = CancellationToken::new();
+        let file = File::open(&path).await.unwrap();
+        let mut follow = FollowFile::new(file, stop.clone());
+
+        let mut buf = [0u8; 16];
+        let n = follow.read(&mut buf).await.unwrap();
+        assert_eq!(&buf[..n], b"hello");
+
+        // append after the reader has caught up with EOF; paused time
+        // auto-advances through the poll interval
+        let mut appender = tokio::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .await
+            .unwrap();
+        appender.write_all(b" world").await.unwrap();
+        appender.flush().await.unwrap();
+
+        let n = follow.read(&mut buf).await.unwrap();
+        assert_eq!(&buf[..n], b" world");
+
+        // cancelling the token turns "wait for more data" into a real EOF
+        stop.cancel();
+        assert_eq!(follow.read(&mut buf).await.unwrap(), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_follow_file_cancelled_mid_wait_reports_eof() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.qmdl");
+        tokio::fs::write(&path, b"").await.unwrap();
+
+        let stop = CancellationToken::new();
+        let file = File::open(&path).await.unwrap();
+        let mut follow = FollowFile::new(file, stop.clone());
+
+        let read_task = tokio::spawn(async move {
+            let mut buf = [0u8; 16];
+            follow.read(&mut buf).await.unwrap()
+        });
+        // let the reader hit EOF and park on its poll interval
+        tokio::task::yield_now().await;
+        stop.cancel();
+        assert_eq!(read_task.await.unwrap(), 0);
+    }
 
     fn rec(latest_packet_timestamp: i64, lat: f64, lon: f64) -> GpsRecord {
         GpsRecord {

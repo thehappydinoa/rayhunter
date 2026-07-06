@@ -51,3 +51,4 @@ url = "2.5.4"
 [dev-dependencies]
 reqwest = { version = "0.12.20", default-features = false, features = ["gzip"] }
 tempfile = "3.10.2"
+tokio = { version = "1.44.2", default-features = false, features = ["test-util", "macros"] }
