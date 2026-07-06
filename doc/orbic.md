@@ -68,6 +68,36 @@ To get started, follow the [release installation guide](./installing-from-releas
 
 The Rayhunter UI will be available at <http://192.168.1.1:8080>.
 
+## Recovering a forgotten admin web password
+
+This is about the **Orbic's own admin UI** (`http://192.168.1.1` / `my.jetpack`),
+*not* the Rayhunter UI. If you are locked out of it, note first that the documented
+"default password is the WiFi password" does **not** always hold — provisioned
+devices often ship with a different generated password.
+
+The pressing-the-reset-button factory reset (see above) always works but wipes the
+device configuration. If you have a [root shell](#shell) (e.g. Rayhunter is already
+installed), you can instead read the password without wiping anything:
+
+```sh
+cat /usrdata/data/usr/goahead/default_pwd
+```
+
+The admin username is `admin`. Log in with that value at `http://192.168.1.1`.
+
+Notes on why the obvious approaches fail, so you don't waste time as we did:
+
+* The web server (`goahead`) validates `/goform/login` against a password stored in
+  **NV**, seeded from `default_pwd`. The credential files
+  `/usrdata/data/usr/goahead/auth.txt`, its `.bak`, and the factory copy
+  `/etc/xml/goahead/auth.txt` are used only for goahead's own `/action/*` HTTP auth —
+  **editing them does not change the web login**, even after restarting goahead.
+* The stored `auth.txt` hashes are plain `md5(password)` but are effectively
+  un-crackable for a generated password; don't bother with hashcat.
+* The web login POSTs `md5(username)` and an obfuscated `md5(password)` (see
+  `/var/www/web/js/encryption.js`); the plaintext in `default_pwd` is what you type
+  into the form.
+
 <a name=shell></a>
 ## Obtaining a shell
 
