@@ -22,7 +22,7 @@ use tokio_util::task::TaskTracker;
 
 #[cfg(feature = "apidocs")]
 use rayhunter::analysis::analyzer::ReportMetadata;
-use rayhunter::analysis::analyzer::{AnalysisLineNormalizer, AnalyzerConfig, EventType};
+use rayhunter::analysis::analyzer::{AnalysisLineNormalizer, AnalyzerConfig, EventType, Position};
 use rayhunter::diag::{DataType, Message, MessagesContainer};
 use rayhunter::diag_device::DiagDevice;
 use rayhunter::qmdl::QmdlWriter;
@@ -70,6 +70,8 @@ pub struct DiagTask {
     bytes_since_space_check: usize,
     low_space_warned: bool,
     latest_packet_timestamp: Option<i64>,
+    /// Most recent GPS fix (lat, lon), used to geolocate live detections.
+    latest_gps: Option<(f64, f64)>,
 }
 
 enum DiagState {
@@ -132,6 +134,7 @@ impl DiagTask {
             bytes_since_space_check: 0,
             low_space_warned: false,
             latest_packet_timestamp: None,
+            latest_gps: None,
         }
     }
 
@@ -140,6 +143,12 @@ impl DiagTask {
         self.max_type_seen = EventType::Informational;
         self.bytes_since_space_check = 0;
         self.low_space_warned = false;
+
+        // Seed the in-memory fix from fixed coordinates so detections are
+        // geolocated even before any GPS API update arrives.
+        if self.gps_mode == GpsMode::Fixed {
+            self.latest_gps = self.gps_fixed_coords;
+        }
 
         match check_disk_space(
             &qmdl_store.path,
@@ -263,6 +272,9 @@ impl DiagTask {
     }
 
     async fn handle_gps_update(&mut self, qmdl_store: &RecordingStore, lat: f64, lon: f64) {
+        // Retain the fix in memory so live detections can be geolocated, even
+        // when there's no active recording to append it to storage.
+        self.latest_gps = Some((lat, lon));
         let Some((entry_idx, _)) = qmdl_store.get_current_entry() else {
             info!("GPS update received but no recording active, not writing to storage");
             return;
@@ -415,7 +427,8 @@ impl DiagTask {
 
             let container_bytes: usize = container.messages.iter().map(|m| m.data.len()).sum();
             self.bytes_since_space_check += container_bytes;
-            let max_type = match analysis_writer.analyze_container(container).await {
+            let position = self.latest_gps.map(|(lat, lon)| Position { lat, lon });
+            let max_type = match analysis_writer.analyze_container(container, position).await {
                 Ok(t) => t,
                 Err(e) => {
                     warn!("failed to analyze container: {e}");

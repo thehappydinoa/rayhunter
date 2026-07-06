@@ -7,7 +7,7 @@ use axum::{
     http::StatusCode,
 };
 use log::{error, info};
-use rayhunter::analysis::analyzer::{AnalyzerConfig, EventType, Harness};
+use rayhunter::analysis::analyzer::{AnalyzerConfig, EventType, Harness, Position};
 use rayhunter::diag::{DiagParsingError, Message, MessagesContainer};
 use rayhunter::qmdl::QmdlMessageReader;
 use serde::Serialize;
@@ -45,15 +45,19 @@ impl AnalysisWriter {
     }
 
     // Runs the analysis harness on the given container, serializing the results
-    // to the analysis file, returning the whether any warnings were detected
+    // to the analysis file, returning the whether any warnings were detected.
+    // `position` is the GPS fix in effect for these packets, if any, and is
+    // stamped onto each written row so detections can be geolocated.
     pub async fn analyze_container(
         &mut self,
         container: MessagesContainer,
+        position: Option<Position>,
     ) -> Result<EventType, std::io::Error> {
         let mut max_type = EventType::Informational;
 
-        for row in self.harness.analyze_qmdl_messages(container) {
+        for mut row in self.harness.analyze_qmdl_messages(container) {
             if !row.is_empty() {
+                row.position = position;
                 self.write(&row).await?;
             }
             max_type = cmp::max(max_type, row.get_max_event_type());
@@ -64,9 +68,11 @@ impl AnalysisWriter {
     pub async fn analyze_message(
         &mut self,
         maybe_qmdl_msg: Result<Message, DiagParsingError>,
+        position: Option<Position>,
     ) -> Result<EventType, std::io::Error> {
-        let row = self.harness.analyze_qmdl_message(maybe_qmdl_msg);
+        let mut row = self.harness.analyze_qmdl_message(maybe_qmdl_msg);
         if !row.is_empty() {
+            row.position = position;
             self.write(&row).await?;
         }
         Ok(row.get_max_event_type())
@@ -176,8 +182,10 @@ async fn perform_analysis(
         .await
         .expect("failed to get message")
     {
+        // Offline re-analysis does not fuse GPS here; position is recovered by
+        // joining the separately-stored per-entry GPS records on timestamp.
         let _ = analysis_writer
-            .analyze_message(maybe_message)
+            .analyze_message(maybe_message, None)
             .await
             .map_err(|e| format!("{e:?}"))?;
     }

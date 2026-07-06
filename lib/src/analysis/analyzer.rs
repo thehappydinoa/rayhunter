@@ -52,9 +52,10 @@ impl Default for AnalyzerConfig {
     }
 }
 
-// Bumped to 3 when Event gained structured serving-cell context and per-event
-// analyzer identity/confidence fields (all backwards-compatible additions).
-pub const REPORT_VERSION: u32 = 3;
+// History of backwards-compatible, additive schema changes:
+//   3: Event gained serving-cell context and per-event analyzer identity.
+//   4: AnalysisRow gained an optional GPS position.
+pub const REPORT_VERSION: u32 = 4;
 
 /// The severity level of an event.
 ///
@@ -257,11 +258,26 @@ impl AnalysisLineNormalizer {
     }
 }
 
+/// A geographic position in WGS84 decimal degrees, attached to an analysis
+/// row so a detection can be placed on a map. Sourced by the daemon from the
+/// active GPS fix (external API or fixed coordinates); the analysis library
+/// itself never populates it.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]
+#[cfg_attr(feature = "apidocs", derive(utoipa::ToSchema))]
+pub struct Position {
+    pub lat: f64,
+    pub lon: f64,
+}
+
 #[derive(Serialize, Debug, Default)]
 pub struct AnalysisRow {
     pub packet_timestamp: Option<DateTime<FixedOffset>>,
     pub skipped_message_reason: Option<String>,
     pub events: Vec<Option<Event>>,
+    /// The GPS position in effect when this row's packet was captured, if a
+    /// fix was available. Stamped by the daemon, not the analysis library.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub position: Option<Position>,
 }
 
 impl AnalysisRow {
@@ -312,6 +328,8 @@ impl<'de> Deserialize<'de> for AnalysisRow {
             packet_timestamp: Option<DateTime<FixedOffset>>,
             skipped_message_reason: Option<String>,
             events: Vec<Option<Event>>,
+            #[serde(default)]
+            position: Option<Position>,
         }
 
         #[derive(Deserialize)]
@@ -330,12 +348,14 @@ impl<'de> Deserialize<'de> for AnalysisRow {
                         packet_timestamp: Some(first_analysis.timestamp),
                         skipped_message_reason: None,
                         events: first_analysis.events.clone(),
+                        ..Default::default()
                     })
                 } else if let Some(first_reason) = v1.skipped_message_reasons.first() {
                     Ok(AnalysisRow {
                         packet_timestamp: Some(v1.timestamp),
                         skipped_message_reason: Some(first_reason.clone()),
                         events: Vec::new(),
+                        ..Default::default()
                     })
                 } else {
                     Err(D::Error::custom(
@@ -347,6 +367,7 @@ impl<'de> Deserialize<'de> for AnalysisRow {
                 packet_timestamp: v2.packet_timestamp,
                 skipped_message_reason: v2.skipped_message_reason,
                 events: v2.events,
+                position: v2.position,
             }),
         }
     }
@@ -420,6 +441,7 @@ impl Harness {
             packet_timestamp: Some(epoch + packet.timestamp),
             skipped_message_reason: None,
             events: Vec::new(),
+            ..Default::default()
         };
         let gsmtap_offset = 20 + 8;
         let gsmtap_data = &packet.data[gsmtap_offset..];
@@ -608,6 +630,40 @@ mod tests {
             EventType::Informational
         );
         assert!(row.events[2].is_none());
+    }
+
+    #[test]
+    fn test_analysis_row_position_roundtrip() {
+        let row = AnalysisRow {
+            packet_timestamp: None,
+            skipped_message_reason: Some("skipped".to_string()),
+            events: Vec::new(),
+            position: Some(Position {
+                lat: 37.7749,
+                lon: -122.4194,
+            }),
+        };
+        let json = serde_json::to_string(&row).unwrap();
+        assert!(json.contains("position"));
+        let back: AnalysisRow = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.position, row.position);
+    }
+
+    #[test]
+    fn test_analysis_row_position_absent_is_omitted() {
+        // A row without a fix must not serialize a `position` key, and an old
+        // row lacking the key must still deserialize.
+        let row = AnalysisRow {
+            skipped_message_reason: Some("skipped".to_string()),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&row).unwrap();
+        assert!(!json.contains("position"));
+        let back: AnalysisRow = serde_json::from_value(
+            json!({ "packet_timestamp": null, "skipped_message_reason": "x", "events": [] }),
+        )
+        .unwrap();
+        assert!(back.position.is_none());
     }
 
     #[test]
