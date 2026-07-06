@@ -433,6 +433,12 @@ impl Harness {
         self.analyzers.push(analyzer);
     }
 
+    /// The most recently observed serving cell, if any SIB1 has been seen. Used
+    /// to surface a "last-seen cell" health signal.
+    pub fn current_serving_cell(&self) -> Option<ServingCellInfo> {
+        self.serving_cell.current()
+    }
+
     pub fn analyze_pcap_packet(&mut self, packet: EnhancedPacketBlock) -> AnalysisRow {
         self.packet_num += 1;
 

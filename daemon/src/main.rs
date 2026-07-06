@@ -7,6 +7,7 @@ mod display;
 mod error;
 mod events;
 mod gps;
+mod health;
 mod key_input;
 mod notifications;
 mod pcap;
@@ -87,6 +88,11 @@ fn get_router() -> AppRouter {
         .route("/api/gps", get(get_gps))
         .route("/api/gps", post(post_gps))
         .route("/api/events", get(crate::events::get_events))
+        .route("/api/health", get(crate::health::get_health))
+        .route(
+            "/api/inject-test-event",
+            post(crate::health::inject_test_event),
+        )
         .route("/", get(|| async { Redirect::permanent("/index.html") }))
         .route("/{*path}", get(serve_static))
 }
@@ -230,6 +236,10 @@ async fn run_with_config(
     // created on demand via `subscribe()` when a client connects.
     let (event_broadcast, _) = tokio::sync::broadcast::channel(events::EVENT_CHANNEL_CAPACITY);
 
+    // Shared with the diag thread: the latest serving cell, surfaced by the
+    // health endpoint.
+    let last_cell = Arc::new(RwLock::new(None));
+
     if !config.debug_mode {
         info!("Starting Diag Thread");
         let gps_fixed_coords = match (config.gps_fixed_latitude, config.gps_fixed_longitude) {
@@ -251,6 +261,7 @@ async fn run_with_config(
             config.gps_mode,
             gps_fixed_coords,
             event_broadcast.clone(),
+            last_cell.clone(),
         );
         info!("Starting UI");
 
@@ -364,6 +375,8 @@ async fn run_with_config(
         gps_state: Arc::new(tokio::sync::RwLock::new(initial_gps)),
         update_status_lock: update_status_lock.clone(),
         event_broadcast,
+        start_time: std::time::Instant::now(),
+        last_cell,
     });
     run_server(&task_tracker, state, shutdown_token.clone()).await;
 

@@ -23,6 +23,7 @@ use tokio_util::task::TaskTracker;
 #[cfg(feature = "apidocs")]
 use rayhunter::analysis::analyzer::ReportMetadata;
 use rayhunter::analysis::analyzer::{AnalysisLineNormalizer, AnalyzerConfig, EventType, Position};
+use rayhunter::analysis::cell_info::ServingCellInfo;
 use rayhunter::diag::{DataType, Message, MessagesContainer};
 use rayhunter::diag_device::DiagDevice;
 use rayhunter::qmdl::QmdlWriter;
@@ -75,6 +76,9 @@ pub struct DiagTask {
     latest_gps: Option<(f64, f64)>,
     /// Broadcasts warnings to `/api/events` SSE subscribers as they fire.
     event_broadcast: EventSender,
+    /// Shared with the HTTP server: the most recently observed serving cell,
+    /// exposed by the health endpoint.
+    last_cell: Arc<RwLock<Option<ServingCellInfo>>>,
 }
 
 enum DiagState {
@@ -123,6 +127,7 @@ impl DiagTask {
         gps_mode: GpsMode,
         gps_fixed_coords: Option<(f64, f64)>,
         event_broadcast: EventSender,
+        last_cell: Arc<RwLock<Option<ServingCellInfo>>>,
     ) -> Self {
         Self {
             ui_update_sender,
@@ -140,6 +145,7 @@ impl DiagTask {
             latest_packet_timestamp: None,
             latest_gps: None,
             event_broadcast,
+            last_cell,
         }
     }
 
@@ -445,6 +451,11 @@ impl DiagTask {
                 }
             };
 
+            // Publish the latest serving cell for the health endpoint.
+            if let Some(cell) = analysis_writer.current_serving_cell() {
+                *self.last_cell.write().await = Some(cell);
+            }
+
             if max_type > EventType::Informational {
                 info!("a heuristic triggered on this run!");
                 self.notification_channel
@@ -490,6 +501,7 @@ pub fn run_diag_read_thread(
     gps_mode: GpsMode,
     gps_fixed_coords: Option<(f64, f64)>,
     event_broadcast: EventSender,
+    last_cell: Arc<RwLock<Option<ServingCellInfo>>>,
 ) {
     task_tracker.spawn(async move {
         info!("Using configuration for device: {0:?}", device);
@@ -509,6 +521,7 @@ pub fn run_diag_read_thread(
             gps_mode,
             gps_fixed_coords,
             event_broadcast,
+            last_cell,
         );
         qmdl_file_tx
             .send(DiagDeviceCtrlMessage::StartRecording { response_tx: None })

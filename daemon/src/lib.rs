@@ -7,6 +7,7 @@ pub mod display;
 pub mod error;
 pub mod events;
 pub mod gps;
+pub mod health;
 pub mod key_input;
 pub mod notifications;
 pub mod pcap;
@@ -53,7 +54,9 @@ use utoipa::OpenApi;
         server::debug_set_display_state,
         gps::post_gps,
         gps::get_gps,
-        events::get_events
+        events::get_events,
+        health::get_health,
+        health::inject_test_event
     ),
     servers(
         (

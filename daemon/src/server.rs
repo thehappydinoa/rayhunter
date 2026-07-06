@@ -51,6 +51,11 @@ pub struct ServerState {
     pub update_status_lock: Arc<RwLock<UpdateStatus>>,
     /// Broadcasts live warning detections to `/api/events` SSE subscribers.
     pub event_broadcast: crate::events::EventSender,
+    /// When this daemon instance started, for the health endpoint's uptime.
+    pub start_time: std::time::Instant,
+    /// The most recently observed serving cell, updated by the diag thread and
+    /// surfaced by the health endpoint.
+    pub last_cell: Arc<RwLock<Option<rayhunter::analysis::cell_info::ServingCellInfo>>>,
 }
 
 #[cfg_attr(feature = "apidocs", utoipa::path(
@@ -625,6 +630,8 @@ mod tests {
             update_status_lock: Arc::new(RwLock::new(UpdateStatus::default())),
             event_broadcast: tokio::sync::broadcast::channel(crate::events::EVENT_CHANNEL_CAPACITY)
                 .0,
+            start_time: std::time::Instant::now(),
+            last_cell: Arc::new(RwLock::new(None)),
         })
     }
 

@@ -54,6 +54,11 @@ impl AnalysisWriter {
         Ok(result)
     }
 
+    /// The most recently observed serving cell for this recording, if any.
+    pub fn current_serving_cell(&self) -> Option<rayhunter::analysis::cell_info::ServingCellInfo> {
+        self.harness.current_serving_cell()
+    }
+
     /// Publish each warning event in a written row to SSE subscribers. Skips
     /// informational events. A send error just means no subscribers, which is
     /// fine — the row is already persisted to the analysis file.
