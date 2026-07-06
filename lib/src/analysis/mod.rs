@@ -1,4 +1,5 @@
 pub mod analyzer;
+pub mod attach_reject_storm;
 pub mod auth_anomaly;
 pub mod cell_info;
 pub mod connection_redirect_downgrade;
