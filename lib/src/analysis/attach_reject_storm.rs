@@ -178,7 +178,7 @@ impl Analyzer for AttachRejectStormAnalyzer {
     }
 
     fn get_version(&self) -> u32 {
-        2
+        3
     }
 
     fn analyze_information_element(
@@ -204,6 +204,26 @@ impl Analyzer for AttachRejectStormAnalyzer {
             }
             _ => return None,
         };
+
+        // EMM cause 7 ("EPS services not allowed") or 8 ("EPS and non-EPS
+        // services not allowed") is a one-shot protocol downgrade attack. The
+        // phone will permanently disable LTE until reboot and fall to 2G/3G
+        // where interception is trivial. Flag immediately at High severity.
+        if matches!(
+            cause,
+            RejectCause::EPSServicesNotAllowed
+                | RejectCause::EPSServicesAndNonEPSServicesNotAllowed
+        ) {
+            return Some(Event {
+                event_type: EventType::High,
+                message: format!(
+                    "LTE downgrade attack: reject with cause '{}' forces phone off LTE \
+                     permanently until reboot — likely cell-site simulator",
+                    cause_name(&cause),
+                ),
+                ..Default::default()
+            });
+        }
 
         // Expire old entries and record this reject with its cause
         self.expire_old(packet_num);
