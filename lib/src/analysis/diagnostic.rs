@@ -155,6 +155,7 @@ impl Analyzer for DiagnosticAnalyzer {
                     Some(Event {
                         event_type: EventType::Informational,
                         message: format!("Diagnostic: {message_type}."),
+                        ..Default::default()
                     })
                 } else {
                     None

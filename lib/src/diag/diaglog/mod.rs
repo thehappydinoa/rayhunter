@@ -213,6 +213,9 @@ pub(crate) mod test {
         );
     }
 
+    // Gated to unix: the input constant lives in the unix-only `diag_device`
+    // module, so this test cannot compile on non-unix hosts (e.g. Windows).
+    #[cfg(target_family = "unix")]
     #[test]
     fn test_build_log_mask_request() {
         let log_type = 11;

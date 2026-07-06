@@ -11,10 +11,14 @@ use crate::util::RuntimeMetadata;
 use crate::{diag::MessagesContainer, gsmtap::parser as gsmtap_parser};
 
 use super::{
+    cell_info::{ServingCellInfo, ServingCellTracker},
     connection_redirect_downgrade::ConnectionRedirect2GDowngradeAnalyzer,
-    imsi_requested::ImsiRequestedAnalyzer, incomplete_sib::IncompleteSibAnalyzer,
-    information_element::InformationElement, nas_null_cipher::NasNullCipherAnalyzer,
-    null_cipher::NullCipherAnalyzer, priority_2g_downgrade::LteSib6And7DowngradeAnalyzer,
+    imsi_requested::ImsiRequestedAnalyzer,
+    incomplete_sib::IncompleteSibAnalyzer,
+    information_element::InformationElement,
+    nas_null_cipher::NasNullCipherAnalyzer,
+    null_cipher::NullCipherAnalyzer,
+    priority_2g_downgrade::LteSib6And7DowngradeAnalyzer,
     test_analyzer::TestAnalyzer,
 };
 
@@ -48,14 +52,17 @@ impl Default for AnalyzerConfig {
     }
 }
 
-pub const REPORT_VERSION: u32 = 2;
+// Bumped to 3 when Event gained structured serving-cell context and per-event
+// analyzer identity/confidence fields (all backwards-compatible additions).
+pub const REPORT_VERSION: u32 = 3;
 
 /// The severity level of an event.
 ///
 /// Informational does not result in any alert on the display.
-#[derive(Serialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Serialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
 #[cfg_attr(feature = "apidocs", derive(utoipa::ToSchema))]
 pub enum EventType {
+    #[default]
     Informational = 0,
     Low = 1,
     Medium = 2,
@@ -104,13 +111,39 @@ impl<'de> Deserialize<'de> for EventType {
     }
 }
 
+/// Identifies the [Analyzer] that produced an [Event], for downstream
+/// per-analyzer false-positive tuning. Stamped centrally by the [Harness].
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "apidocs", derive(utoipa::ToSchema))]
+pub struct AnalyzerId {
+    /// The analyzer's user-facing name (see [`Analyzer::get_name`]).
+    pub name: String,
+    /// The analyzer's version (see [`Analyzer::get_version`]).
+    pub version: u32,
+}
+
 /// Events are user-facing signals that can be emitted by an [Analyzer] upon a
 /// message being received. They can be used to signifiy an IC detection
 /// warning, or just to display some relevant information to the user.
-#[derive(Serialize, Deserialize, Debug, Clone)]
+///
+/// Beyond the human-readable `message`, events optionally carry structured
+/// context for machine consumers: which `analyzer` fired, its `confidence`,
+/// and the serving `cell` in effect when it fired. These are additive and
+/// omitted from serialization when unset, so older consumers are unaffected.
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
 pub struct Event {
     pub event_type: EventType,
     pub message: String,
+    /// The analyzer that produced this event. Stamped by the [Harness].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub analyzer: Option<AnalyzerId>,
+    /// Optional analyzer-supplied confidence in the detection, in `[0.0, 1.0]`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<f32>,
+    /// The serving cell in effect when this event fired. Stamped by the
+    /// [Harness] from the most recently observed SIB1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cell: Option<ServingCellInfo>,
 }
 
 /// An [Analyzer] represents one type of heuristic for detecting an IMSI Catcher
@@ -322,6 +355,7 @@ impl<'de> Deserialize<'de> for AnalysisRow {
 pub struct Harness {
     analyzers: Vec<Box<dyn Analyzer + Send>>,
     packet_num: usize,
+    serving_cell: ServingCellTracker,
 }
 
 impl Default for Harness {
@@ -335,6 +369,7 @@ impl Harness {
         Self {
             analyzers: Vec::new(),
             packet_num: 0,
+            serving_cell: ServingCellTracker::new(),
         }
     }
 
@@ -469,6 +504,13 @@ impl Harness {
         // methods that call this one. This could be changed with some careful refactoring, but
         // while this method is only used by other Harness methods, let's keep it private to help
         // ensure we always bump packet_num exactly once for each processed packet.
+
+        // Update the serving-cell context from this element before running the
+        // analyzers, so an event emitted on the same SIB1 that establishes the
+        // cell identity is stamped with it.
+        self.serving_cell.observe(ie);
+        let current_cell = self.serving_cell.current();
+
         let packet_str = format!(" (packet {})", self.packet_num);
         self.analyzers
             .iter_mut()
@@ -476,6 +518,19 @@ impl Harness {
                 let mut maybe_event = analyzer.analyze_information_element(ie, self.packet_num);
                 if let Some(ref mut event) = maybe_event {
                     event.message.push_str(&packet_str);
+                    // Stamp structured context centrally so individual analyzers
+                    // don't have to. An analyzer may still set its own cell (e.g.
+                    // for a neighbor rather than the serving cell); respect that.
+                    event.analyzer.get_or_insert_with(|| AnalyzerId {
+                        name: analyzer.get_name().into_owned(),
+                        version: analyzer.get_version(),
+                    });
+                    if event.cell.is_none()
+                        && let Some(cell) = &current_cell
+                        && !cell.is_empty()
+                    {
+                        event.cell = Some(cell.clone());
+                    }
                 }
                 maybe_event
             })
@@ -553,5 +608,86 @@ mod tests {
             EventType::Informational
         );
         assert!(row.events[2].is_none());
+    }
+
+    #[test]
+    fn test_event_backcompat_missing_structured_fields() {
+        // An event serialized before the structured fields existed must still
+        // deserialize, leaving the new fields unset.
+        let event: Event =
+            serde_json::from_value(json!({ "event_type": "High", "message": "hi" })).unwrap();
+        assert!(event.analyzer.is_none());
+        assert!(event.confidence.is_none());
+        assert!(event.cell.is_none());
+    }
+
+    #[test]
+    fn test_event_roundtrip_with_structured_fields() {
+        use crate::analysis::cell_info::{Plmn, ServingCellInfo};
+
+        let event = Event {
+            event_type: EventType::High,
+            message: "null cipher".to_string(),
+            analyzer: Some(AnalyzerId {
+                name: "Null Cipher".to_string(),
+                version: 2,
+            }),
+            confidence: Some(0.9),
+            cell: Some(ServingCellInfo {
+                plmn: Some(Plmn {
+                    mcc: "310".to_string(),
+                    mnc: "410".to_string(),
+                }),
+                tac: Some(0x1234),
+                cell_id: Some(0x0ABCDEF),
+                band: Some(2),
+                ..Default::default()
+            }),
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        let back: Event = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.analyzer, event.analyzer);
+        assert_eq!(back.confidence, event.confidence);
+        assert_eq!(back.cell, event.cell);
+    }
+
+    struct AlwaysFires;
+    impl Analyzer for AlwaysFires {
+        fn get_name(&self) -> Cow<'_, str> {
+            Cow::from("Always Fires")
+        }
+        fn get_description(&self) -> Cow<'_, str> {
+            Cow::from("test analyzer that fires on every element")
+        }
+        fn analyze_information_element(
+            &mut self,
+            _ie: &InformationElement,
+            _packet_num: usize,
+        ) -> Option<Event> {
+            Some(Event {
+                event_type: EventType::Low,
+                message: "fired".to_string(),
+                ..Default::default()
+            })
+        }
+        fn get_version(&self) -> u32 {
+            7
+        }
+    }
+
+    #[test]
+    fn test_harness_stamps_analyzer_identity() {
+        let mut harness = Harness::new();
+        harness.add_analyzer(Box::new(AlwaysFires));
+        // A GSM element carries no cell identity, so `cell` stays unset while
+        // the analyzer identity is still stamped.
+        let events = harness.analyze_information_element(&InformationElement::GSM);
+        let event = events[0].as_ref().unwrap();
+        let analyzer = event.analyzer.as_ref().expect("analyzer stamped");
+        assert_eq!(analyzer.name, "Always Fires");
+        assert_eq!(analyzer.version, 7);
+        assert!(event.cell.is_none());
+        // The central packet-number suffix is still appended.
+        assert!(event.message.contains("packet"));
     }
 }

@@ -80,6 +80,7 @@ impl Analyzer for LteSib6And7DowngradeAnalyzer {
                         message:
                             "LTE cell advertised a legacy (3G/2G) neighbors but no LTE neighbors"
                                 .to_string(),
+                        ..Default::default()
                     })
                 } else {
                     Some(Event {
@@ -87,6 +88,7 @@ impl Analyzer for LteSib6And7DowngradeAnalyzer {
                         message:
                             format!("LTE cell advertised a legacy (3G/2G) cell for priority {:?} reselection over LTE neighbors at priority {:?}", self.legacy_priority?, self.lte_priority)
                                 .to_string(),
+                        ..Default::default()
                     })
                 }
             } else {

@@ -59,6 +59,7 @@ impl ImsiRequestedAnalyzer {
                 self.flag = Some(Event {
                     event_type: EventType::High,
                     message: "Identity requested after auth request".to_string(),
+                    ..Default::default()
                 });
             }
 
@@ -67,6 +68,7 @@ impl ImsiRequestedAnalyzer {
                 self.flag = Some(Event {
                     event_type: EventType::High,
                     message: "Identity requested without Attach Request".to_string(),
+                    ..Default::default()
                 });
             }
 
@@ -75,6 +77,7 @@ impl ImsiRequestedAnalyzer {
                 self.flag = Some(Event {
                     event_type: EventType::High,
                     message: "Disconnected after Identity Request without Auth Accept".to_string(),
+                    ..Default::default()
                 });
             }
 
@@ -170,6 +173,7 @@ impl Analyzer for ImsiRequestedAnalyzer {
                 self.flag = Some(Event {
                     event_type: EventType::Informational {},
                     message: "Identity request happened without auth request followup".to_string(),
+                    ..Default::default()
                 });
                 self.timeout_counter = 0;
             }

@@ -159,6 +159,7 @@ impl Analyzer for NullCipherAnalyzer {
             return Some(Event {
                 event_type: EventType::High,
                 message: "Cell suggested use of null cipher".to_string(),
+                ..Default::default()
             });
         }
         None

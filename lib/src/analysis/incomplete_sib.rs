@@ -34,6 +34,7 @@ impl Analyzer for IncompleteSibAnalyzer {
             return Some(Event {
                 event_type: EventType::Informational,
                 message: "SIB1 scheduling info list was malformed".to_string(),
+                ..Default::default()
             });
         }
         None

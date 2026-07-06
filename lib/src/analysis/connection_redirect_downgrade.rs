@@ -42,10 +42,12 @@ impl Analyzer for ConnectionRedirect2GDowngradeAnalyzer {
                 RedirectedCarrierInfo::Geran(_carrier_freqs_geran) => Some(Event {
                     event_type: EventType::High,
                     message: "Detected 2G downgrade".to_owned(),
+                    ..Default::default()
                 }),
                 _ => Some(Event {
                     event_type: EventType::Informational,
                     message: format!("RRCConnectionRelease CarrierInfo: {carrier_info:?}"),
+                    ..Default::default()
                 }),
             }
         } else {

@@ -43,6 +43,7 @@ impl Analyzer for NasNullCipherAnalyzer {
             return Some(Event {
                 event_type: EventType::High,
                 message: "NAS Security mode command requested null cipher".to_string(),
+                ..Default::default()
             });
         }
         None
