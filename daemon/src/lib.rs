@@ -34,6 +34,7 @@ use utoipa::OpenApi;
     paths(
         pcap::get_pcap,
         server::get_qmdl,
+        server::get_qmdl_slice,
         server::get_zip,
         stats::get_system_stats,
         stats::get_qmdl_manifest,

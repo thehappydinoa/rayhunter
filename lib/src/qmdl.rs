@@ -187,6 +187,19 @@ where
     pub async fn get_next_message(
         &mut self,
     ) -> Result<Option<Result<Message, DiagParsingError>>, std::io::Error> {
+        Ok(self
+            .get_next_message_with_bytes()
+            .await?
+            .map(|(_, parsed)| parsed))
+    }
+
+    /// Like [`get_next_message`](Self::get_next_message), but also returns the
+    /// raw HDLC frame bytes alongside the parsed message. Useful for extracting
+    /// a byte-exact slice of a recording (e.g. the messages around a warning)
+    /// that can be re-serialized as a valid QMDL stream.
+    pub async fn get_next_message_with_bytes(
+        &mut self,
+    ) -> Result<Option<(Vec<u8>, Result<Message, DiagParsingError>)>, std::io::Error> {
         let mut buf = vec![];
         if self
             .buf_reader
@@ -197,7 +210,8 @@ where
             return Ok(None);
         }
 
-        Ok(Some(Message::from_hdlc(&buf)))
+        let parsed = Message::from_hdlc(&buf);
+        Ok(Some((buf, parsed)))
     }
 }
 
@@ -266,6 +280,28 @@ mod test {
         for msg in expected_messages {
             assert_eq!(Ok(msg), reader.get_next_message().await.unwrap().unwrap());
         }
+    }
+
+    #[tokio::test]
+    async fn test_get_next_message_with_bytes_roundtrip() {
+        // The raw frames returned alongside each parsed message must, when
+        // concatenated, form a valid QMDL that reads back to the same messages.
+        // This is what makes the forensic-slice endpoint produce a usable file.
+        let mut buf = Cursor::new(get_test_message_bytes());
+        let mut reader = QmdlMessageReader::new(&mut buf).await.unwrap();
+        let mut collected = Vec::new();
+        while let Some((raw, parsed)) = reader.get_next_message_with_bytes().await.unwrap() {
+            assert!(parsed.is_ok());
+            collected.extend_from_slice(&raw);
+        }
+
+        let mut buf2 = Cursor::new(collected);
+        let mut reader2 = QmdlMessageReader::new(&mut buf2).await.unwrap();
+        let (_, expected_messages) = get_test_messages();
+        for msg in expected_messages {
+            assert_eq!(Ok(msg), reader2.get_next_message().await.unwrap().unwrap());
+        }
+        assert!(matches!(reader2.get_next_message().await, Ok(None)));
     }
 
     #[tokio::test]

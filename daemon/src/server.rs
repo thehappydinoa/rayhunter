@@ -5,6 +5,7 @@ use async_zip::tokio::write::ZipFileWriter;
 use axum::Json;
 use axum::body::Body;
 use axum::extract::Path;
+use axum::extract::Query;
 use axum::extract::State;
 use axum::http::header::{self, CONTENT_TYPE};
 use axum::http::{HeaderValue, StatusCode};
@@ -12,6 +13,7 @@ use axum::response::{IntoResponse, Response};
 use chrono::{DateTime, Local};
 use futures::TryStreamExt;
 use log::{error, warn};
+use rayhunter::diag::Message;
 use rayhunter::qmdl::QmdlMessageReader;
 use serde::{Deserialize, Serialize};
 use std::pin::pin;
@@ -103,6 +105,119 @@ pub async fn get_qmdl(
     let headers = [(CONTENT_TYPE, "application/octet-stream")];
     let body = Body::from_stream(qmdl_reader.into_qmdl_stream());
     Ok((headers, body).into_response())
+}
+
+/// Time window (modem-clock epoch milliseconds) for a QMDL slice.
+#[derive(Deserialize)]
+#[cfg_attr(feature = "apidocs", derive(utoipa::IntoParams))]
+pub struct QmdlSliceParams {
+    /// Start of the window, inclusive, in epoch milliseconds.
+    pub start_ms: i64,
+    /// End of the window, inclusive, in epoch milliseconds.
+    pub end_ms: i64,
+}
+
+/// Extract the raw QMDL messages captured within a time window — a forensic
+/// slice around a detection. The response is a valid (uncompressed) QMDL
+/// stream containing just those messages, suitable for archiving next to a
+/// warning or re-analyzing later.
+#[cfg_attr(feature = "apidocs", utoipa::path(
+    get,
+    path = "/api/qmdl-slice/{name}",
+    tag = "Recordings",
+    params(
+        ("name" = String, Path, description = "Recording name, or \"live\" for the active recording"),
+        QmdlSliceParams,
+    ),
+    responses(
+        (status = 200, description = "QMDL slice", content_type = "application/octet-stream"),
+        (status = 400, description = "Invalid time window"),
+        (status = 404, description = "Recording not found"),
+        (status = 503, description = "No active recording for \"live\"")
+    ),
+    summary = "QMDL forensic slice",
+    description = "Return the raw DIAG messages whose modem timestamp falls within [start_ms, end_ms] as a self-contained QMDL, for storing alongside or re-analyzing a detection. Timestamps match an event's packet_timestamp."
+))]
+pub async fn get_qmdl_slice(
+    State(state): State<Arc<ServerState>>,
+    Path(qmdl_name): Path<String>,
+    Query(params): Query<QmdlSliceParams>,
+) -> Result<Response, (StatusCode, String)> {
+    if params.end_ms < params.start_ms {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "end_ms must be greater than or equal to start_ms".to_string(),
+        ));
+    }
+
+    let qmdl_store = state.qmdl_store_lock.read().await;
+    let (entry_index, _) = if qmdl_name == "live" {
+        qmdl_store.get_current_entry().ok_or((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "No active recording to slice, try starting a new recording!".to_string(),
+        ))?
+    } else {
+        let name = qmdl_name.trim_end_matches(".qmdl");
+        qmdl_store.entry_for_name(name).ok_or((
+            StatusCode::NOT_FOUND,
+            format!("couldn't find qmdl file with name {name}"),
+        ))?
+    };
+
+    let qmdl_file = qmdl_store
+        .open_file(entry_index, FileKind::Qmdl)
+        .await
+        .map_err(|err| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("error opening QMDL file: {err}"),
+            )
+        })?
+        .ok_or((StatusCode::NOT_FOUND, "QMDL file not found".to_string()))?;
+    let mut reader = QmdlMessageReader::new(qmdl_file).await.map_err(|err| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("error reading QMDL file: {err}"),
+        )
+    })?;
+
+    // Collect the raw frames of every message timestamped within the window.
+    // Untimestamped frames (e.g. control responses) are included only while we
+    // are already inside the window, so the slice stays contiguous. Messages
+    // are chronological, so we can stop once we pass the end of the window.
+    let mut out: Vec<u8> = Vec::new();
+    let mut inside_window = false;
+    loop {
+        match reader.get_next_message_with_bytes().await.map_err(|err| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("error reading QMDL message: {err}"),
+            )
+        })? {
+            None => break,
+            Some((raw, parsed)) => {
+                let timestamp_ms = match &parsed {
+                    Ok(Message::Log { timestamp, .. }) => {
+                        Some(timestamp.to_datetime().timestamp_millis())
+                    }
+                    _ => None,
+                };
+                match timestamp_ms {
+                    Some(ts) if ts < params.start_ms => continue,
+                    Some(ts) if ts > params.end_ms => break,
+                    Some(_) => {
+                        inside_window = true;
+                        out.extend_from_slice(&raw);
+                    }
+                    None if inside_window => out.extend_from_slice(&raw),
+                    None => {}
+                }
+            }
+        }
+    }
+
+    let headers = [(CONTENT_TYPE, "application/octet-stream")];
+    Ok((headers, out).into_response())
 }
 
 pub async fn serve_static(
