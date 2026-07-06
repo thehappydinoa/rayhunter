@@ -8,6 +8,8 @@ use axum::{
 };
 use log::{error, info};
 use rayhunter::analysis::analyzer::{AnalyzerConfig, EventType, Harness, Position};
+
+use crate::events::{EventSender, LiveEvent};
 use rayhunter::diag::{DiagParsingError, Message, MessagesContainer};
 use rayhunter::qmdl::QmdlMessageReader;
 use serde::Serialize;
@@ -23,6 +25,9 @@ use crate::server::ServerState;
 pub struct AnalysisWriter {
     writer: BufWriter<File>,
     harness: Harness,
+    /// When set (live recording), each warning is broadcast to SSE subscribers.
+    /// `None` for offline re-analysis, which must not emit live events.
+    event_broadcast: Option<EventSender>,
 }
 
 // We write our analysis results to a file immediately to minimize the amount of
@@ -32,16 +37,39 @@ pub struct AnalysisWriter {
 // lets us simply append new rows to the end without parsing the entire JSON
 // object beforehand.
 impl AnalysisWriter {
-    pub async fn new(file: File, analyzer_config: &AnalyzerConfig) -> Result<Self, std::io::Error> {
+    pub async fn new(
+        file: File,
+        analyzer_config: &AnalyzerConfig,
+        event_broadcast: Option<EventSender>,
+    ) -> Result<Self, std::io::Error> {
         let harness = Harness::new_with_config(analyzer_config);
 
         let mut result = Self {
             writer: BufWriter::new(file),
             harness,
+            event_broadcast,
         };
         let metadata = result.harness.get_metadata();
         result.write(&metadata).await?;
         Ok(result)
+    }
+
+    /// Publish each warning event in a written row to SSE subscribers. Skips
+    /// informational events. A send error just means no subscribers, which is
+    /// fine — the row is already persisted to the analysis file.
+    fn broadcast_row(&self, row: &rayhunter::analysis::analyzer::AnalysisRow) {
+        let Some(sender) = &self.event_broadcast else {
+            return;
+        };
+        for event in row.events.iter().flatten() {
+            if event.event_type > EventType::Informational {
+                let _ = sender.send(LiveEvent {
+                    timestamp: row.packet_timestamp,
+                    position: row.position,
+                    event: event.clone(),
+                });
+            }
+        }
     }
 
     // Runs the analysis harness on the given container, serializing the results
@@ -59,6 +87,7 @@ impl AnalysisWriter {
             if !row.is_empty() {
                 row.position = position;
                 self.write(&row).await?;
+                self.broadcast_row(&row);
             }
             max_type = cmp::max(max_type, row.get_max_event_type());
         }
@@ -74,6 +103,7 @@ impl AnalysisWriter {
         if !row.is_empty() {
             row.position = position;
             self.write(&row).await?;
+            self.broadcast_row(&row);
         }
         Ok(row.get_max_event_type())
     }
@@ -172,7 +202,8 @@ async fn perform_analysis(
         (analysis_file, qmdl_reader)
     };
 
-    let mut analysis_writer = AnalysisWriter::new(analysis_file, analyzer_config)
+    // Offline re-analysis must not emit live SSE events.
+    let mut analysis_writer = AnalysisWriter::new(analysis_file, analyzer_config, None)
         .await
         .map_err(|e| format!("{e:?}"))?;
 

@@ -5,6 +5,7 @@ pub mod crypto_provider;
 pub mod diag;
 pub mod display;
 pub mod error;
+pub mod events;
 pub mod gps;
 pub mod key_input;
 pub mod notifications;
@@ -51,7 +52,8 @@ use utoipa::OpenApi;
         server::set_time_offset,
         server::debug_set_display_state,
         gps::post_gps,
-        gps::get_gps
+        gps::get_gps,
+        events::get_events
     ),
     servers(
         (

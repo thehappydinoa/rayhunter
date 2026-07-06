@@ -30,6 +30,7 @@ use rayhunter::qmdl::QmdlWriter;
 use crate::analysis::{AnalysisCtrlMessage, AnalysisWriter};
 use crate::config::GpsMode;
 use crate::display;
+use crate::events::EventSender;
 use crate::notifications::{Notification, NotificationType};
 use crate::qmdl_store::{FileKind, RecordingStore, RecordingStoreError};
 use crate::server::ServerState;
@@ -72,6 +73,8 @@ pub struct DiagTask {
     latest_packet_timestamp: Option<i64>,
     /// Most recent GPS fix (lat, lon), used to geolocate live detections.
     latest_gps: Option<(f64, f64)>,
+    /// Broadcasts warnings to `/api/events` SSE subscribers as they fire.
+    event_broadcast: EventSender,
 }
 
 enum DiagState {
@@ -119,6 +122,7 @@ impl DiagTask {
         min_space_to_continue_mb: u64,
         gps_mode: GpsMode,
         gps_fixed_coords: Option<(f64, f64)>,
+        event_broadcast: EventSender,
     ) -> Self {
         Self {
             ui_update_sender,
@@ -135,6 +139,7 @@ impl DiagTask {
             low_space_warned: false,
             latest_packet_timestamp: None,
             latest_gps: None,
+            event_broadcast,
         }
     }
 
@@ -196,9 +201,13 @@ impl DiagTask {
         }
         self.stop_current_recording(qmdl_store).await;
         let qmdl_writer = Box::new(QmdlWriter::new(qmdl_gz_file));
-        let analysis_writer = AnalysisWriter::new(analysis_file, &self.analyzer_config)
-            .await
-            .map_err(RecordingStoreError::WriteFileError)?;
+        let analysis_writer = AnalysisWriter::new(
+            analysis_file,
+            &self.analyzer_config,
+            Some(self.event_broadcast.clone()),
+        )
+        .await
+        .map_err(RecordingStoreError::WriteFileError)?;
         self.state = DiagState::Recording {
             qmdl_writer,
             analysis_writer: Box::new(analysis_writer),
@@ -480,6 +489,7 @@ pub fn run_diag_read_thread(
     min_space_to_continue_mb: u64,
     gps_mode: GpsMode,
     gps_fixed_coords: Option<(f64, f64)>,
+    event_broadcast: EventSender,
 ) {
     task_tracker.spawn(async move {
         info!("Using configuration for device: {0:?}", device);
@@ -498,6 +508,7 @@ pub fn run_diag_read_thread(
             min_space_to_continue_mb,
             gps_mode,
             gps_fixed_coords,
+            event_broadcast,
         );
         qmdl_file_tx
             .send(DiagDeviceCtrlMessage::StartRecording { response_tx: None })

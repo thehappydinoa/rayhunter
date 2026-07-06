@@ -5,6 +5,7 @@ mod crypto_provider;
 mod diag;
 mod display;
 mod error;
+mod events;
 mod gps;
 mod key_input;
 mod notifications;
@@ -85,6 +86,7 @@ fn get_router() -> AppRouter {
         .route("/api/debug/display-state", post(debug_set_display_state))
         .route("/api/gps", get(get_gps))
         .route("/api/gps", post(post_gps))
+        .route("/api/events", get(crate::events::get_events))
         .route("/", get(|| async { Redirect::permanent("/index.html") }))
         .route("/{*path}", get(serve_static))
 }
@@ -222,6 +224,12 @@ async fn run_with_config(
     let notification_service = NotificationService::new(config.ntfy_url.clone());
     let update_status_lock = Arc::new(RwLock::new(UpdateStatus::default()));
 
+    // Broadcast channel for live warning detections streamed over SSE
+    // (/api/events). The sender (held by the diag thread and ServerState) keeps
+    // the channel alive; the initial receiver is dropped since subscribers are
+    // created on demand via `subscribe()` when a client connects.
+    let (event_broadcast, _) = tokio::sync::broadcast::channel(events::EVENT_CHANNEL_CAPACITY);
+
     if !config.debug_mode {
         info!("Starting Diag Thread");
         let gps_fixed_coords = match (config.gps_fixed_latitude, config.gps_fixed_longitude) {
@@ -242,6 +250,7 @@ async fn run_with_config(
             config.min_space_to_continue_recording_mb,
             config.gps_mode,
             gps_fixed_coords,
+            event_broadcast.clone(),
         );
         info!("Starting UI");
 
@@ -354,6 +363,7 @@ async fn run_with_config(
         wifi_scan_lock: tokio::sync::Mutex::new(()),
         gps_state: Arc::new(tokio::sync::RwLock::new(initial_gps)),
         update_status_lock: update_status_lock.clone(),
+        event_broadcast,
     });
     run_server(&task_tracker, state, shutdown_token.clone()).await;
 

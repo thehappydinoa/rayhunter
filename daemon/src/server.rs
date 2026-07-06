@@ -49,6 +49,8 @@ pub struct ServerState {
     pub wifi_scan_lock: tokio::sync::Mutex<()>,
     pub gps_state: Arc<RwLock<Option<GpsData>>>,
     pub update_status_lock: Arc<RwLock<UpdateStatus>>,
+    /// Broadcasts live warning detections to `/api/events` SSE subscribers.
+    pub event_broadcast: crate::events::EventSender,
 }
 
 #[cfg_attr(feature = "apidocs", utoipa::path(
@@ -621,6 +623,8 @@ mod tests {
             wifi_scan_lock: tokio::sync::Mutex::new(()),
             gps_state: Arc::new(RwLock::new(None)),
             update_status_lock: Arc::new(RwLock::new(UpdateStatus::default())),
+            event_broadcast: tokio::sync::broadcast::channel(crate::events::EVENT_CHANNEL_CAPACITY)
+                .0,
         })
     }
 
