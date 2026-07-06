@@ -11,6 +11,7 @@ use crate::util::RuntimeMetadata;
 use crate::{diag::MessagesContainer, gsmtap::parser as gsmtap_parser};
 
 use super::{
+    auth_anomaly::AuthAnomalyAnalyzer,
     cell_info::{ServingCellInfo, ServingCellTracker},
     connection_redirect_downgrade::ConnectionRedirect2GDowngradeAnalyzer,
     imsi_requested::ImsiRequestedAnalyzer,
@@ -20,6 +21,7 @@ use super::{
     null_cipher::NullCipherAnalyzer,
     priority_2g_downgrade::LteSib6And7DowngradeAnalyzer,
     test_analyzer::TestAnalyzer,
+    type0_sms::Type0SmsAnalyzer,
 };
 
 /// A list of booleans which stores information about which analyzers are enabled
@@ -35,6 +37,8 @@ pub struct AnalyzerConfig {
     pub incomplete_sib: bool,
     pub test_analyzer: bool,
     pub imsi_requested: bool,
+    pub auth_anomaly: bool,
+    pub type0_sms: bool,
 }
 
 impl Default for AnalyzerConfig {
@@ -48,6 +52,8 @@ impl Default for AnalyzerConfig {
             nas_null_cipher: true,
             incomplete_sib: true,
             test_analyzer: false,
+            auth_anomaly: true,
+            type0_sms: true,
         }
     }
 }
@@ -420,6 +426,14 @@ impl Harness {
 
         if analyzer_config.test_analyzer {
             harness.add_analyzer(Box::new(TestAnalyzer {}))
+        }
+
+        if analyzer_config.auth_anomaly {
+            harness.add_analyzer(Box::new(AuthAnomalyAnalyzer::new()));
+        }
+
+        if analyzer_config.type0_sms {
+            harness.add_analyzer(Box::new(Type0SmsAnalyzer {}));
         }
 
         if analyzer_config.diagnostic_analyzer {

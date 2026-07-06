@@ -1,4 +1,5 @@
 pub mod analyzer;
+pub mod auth_anomaly;
 pub mod cell_info;
 pub mod connection_redirect_downgrade;
 pub mod diagnostic;
@@ -9,4 +10,5 @@ pub mod nas_null_cipher;
 pub mod null_cipher;
 pub mod priority_2g_downgrade;
 pub mod test_analyzer;
+pub mod type0_sms;
 pub mod util;
