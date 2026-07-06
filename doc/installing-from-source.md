@@ -56,6 +56,12 @@ build script skips them and the installer will warn if a device needs them.
 Build them in WSL, or use a release artifact, if you need the WiFi client
 feature.
 
+For fast development iteration on a device that already has Rayhunter and ADB
+access, `make.ps1` (the Windows counterpart of `make.sh`) rebuilds the daemon
+and pushes it over ADB. Note that `adb push` from Windows cannot preserve the
+executable bit, so the daemon must be `chmod 755`'d after pushing —
+`make.ps1` handles this.
+
 Known pitfall: Git for Windows ships its own `mingw64\bin` with older copies
 of gcc's dependency DLLs. If it precedes the MSYS2 toolchain on `PATH`, gcc's
 `cc1.exe` fails with `STATUS_ENTRYPOINT_NOT_FOUND` and cc-rs reports an opaque
