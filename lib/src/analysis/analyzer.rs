@@ -15,6 +15,7 @@ use super::{
     auth_anomaly::AuthAnomalyAnalyzer,
     cell_info::{ServingCellInfo, ServingCellTracker},
     connection_redirect_downgrade::ConnectionRedirect2GDowngradeAnalyzer,
+    imsi_paging::ImsiPagingAnalyzer,
     imsi_requested::ImsiRequestedAnalyzer,
     incomplete_sib::IncompleteSibAnalyzer,
     information_element::InformationElement,
@@ -41,6 +42,7 @@ pub struct AnalyzerConfig {
     pub auth_anomaly: bool,
     pub type0_sms: bool,
     pub attach_reject_storm: bool,
+    pub imsi_paging: bool,
 }
 
 impl Default for AnalyzerConfig {
@@ -57,6 +59,7 @@ impl Default for AnalyzerConfig {
             auth_anomaly: true,
             type0_sms: true,
             attach_reject_storm: true,
+            imsi_paging: true,
         }
     }
 }
@@ -441,6 +444,10 @@ impl Harness {
 
         if analyzer_config.attach_reject_storm {
             harness.add_analyzer(Box::new(AttachRejectStormAnalyzer::new()));
+        }
+
+        if analyzer_config.imsi_paging {
+            harness.add_analyzer(Box::new(ImsiPagingAnalyzer {}));
         }
 
         if analyzer_config.diagnostic_analyzer {
