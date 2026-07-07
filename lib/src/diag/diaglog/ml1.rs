@@ -28,9 +28,21 @@
 //!   *measured* cell (serving or neighbor), identified by its EARFCN — the
 //!   caller attributes RSRP to the serving cell only on an EARFCN match. RSRQ
 //!   is not yet located for v18.
+//!
+//!   Because the reliable per-cell discriminator here is EARFCN alone (the v18
+//!   PCI field has not been located), an *intra-frequency* neighbor — which
+//!   shares the serving cell's EARFCN — cannot be distinguished from the serving
+//!   cell, so its RSRP can be attributed to the serving cell. On a stable/served
+//!   device this is the serving cell in practice; treat the value as "RSRP of a
+//!   cell on the serving carrier."
 
 /// The serving-cell measurement subpacket id within `0xB193`.
 const SUBPACKET_ID_SERVING_CELL_MEAS: u8 = 25;
+
+/// Plausible LTE RSRP range in dBm (3GPP measurement range is roughly
+/// -140..-44); values outside this are treated as padding/garbage.
+const RSRP_MIN_DBM: f32 = -140.0;
+const RSRP_MAX_DBM: f32 = -30.0;
 
 /// A single measured-cell record decoded from a `0xB193` packet. `earfcn`
 /// identifies which cell the measurement is for (may be a neighbor, not the
@@ -79,9 +91,14 @@ impl ServingCellMeasurement {
     fn parse_subpacket_v18(sp: &[u8]) -> Option<Self> {
         let earfcn = u32_le(sp, 0)? & 0x3_ffff;
         let rsrp = -180.0 + (u32_le(sp, 32)? & 0xfff) as f32 * 0.0625;
+        // Drop physically implausible values: a zeroed/padding field decodes to
+        // -180 dBm, well outside the real RSRP range, and must not be reported.
+        let rsrp = (RSRP_MIN_DBM..=RSRP_MAX_DBM)
+            .contains(&rsrp)
+            .then_some(rsrp);
         Some(Self {
             earfcn,
-            rsrp: Some(rsrp),
+            rsrp,
             rsrq: None,
         })
     }
@@ -111,6 +128,17 @@ mod tests {
         // 1583 / 16 - 180 = -81.0625
         assert!((m.rsrp.expect("rsrp") - (-81.0625)).abs() < 0.01);
         assert_eq!(m.rsrq, None);
+    }
+
+    #[test]
+    fn v18_zeroed_rsrp_field_is_none() {
+        // A zeroed sp+32 decodes to -180 dBm, which is implausible and must be
+        // reported as absent, not as a real measurement.
+        let mut b = orbic_v18_body();
+        b[40..44].copy_from_slice(&0u32.to_le_bytes());
+        let m = ServingCellMeasurement::parse(&b).expect("still parses");
+        assert_eq!(m.earfcn, 5780);
+        assert_eq!(m.rsrp, None);
     }
 
     #[test]

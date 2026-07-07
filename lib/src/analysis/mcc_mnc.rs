@@ -143,8 +143,6 @@ pub fn operator_name(mcc: &str, mnc: &str) -> Option<&'static str> {
         ("310", "730") | ("311", "220") | ("311", "580") => "UScellular",
         // Dish Wireless / Boost
         ("313", "340") | ("310", "390") => "Dish Wireless",
-        // Google Fi (data PLMN)
-        ("311", "070") => "Google Fi",
 
         // --- Canada (302) ---
         ("302", "220") | ("302", "221") => "Telus",

@@ -187,6 +187,13 @@ impl ServingCellTracker {
     /// merged into the current cell rather than replacing it.
     pub fn observe_physical(&mut self, pci: u16, earfcn: u32) {
         let current = self.current.get_or_insert_with(ServingCellInfo::default);
+        // A change of serving carrier invalidates the previously recorded
+        // signal, which was measured on the old EARFCN. Clear it so a stale
+        // RSRP can't linger across a reselection until a fresh ML1 arrives.
+        if current.earfcn != Some(earfcn) {
+            current.rsrp = None;
+            current.rsrq = None;
+        }
         current.pci = Some(pci);
         current.earfcn = Some(earfcn);
     }
@@ -197,6 +204,11 @@ impl ServingCellTracker {
     /// ML1 reports measured cells including neighbors, so the measurement is
     /// attributed to the serving cell only when its `earfcn` matches the serving
     /// cell's (established from the RRC OTA header). A no-op otherwise.
+    ///
+    /// Caveat: an intra-frequency neighbor shares the serving EARFCN, and the
+    /// v18 layout exposes no reliable PCI to distinguish it, so a co-channel
+    /// neighbor's RSRP can be attributed here. Treat this as the RSRP of a cell
+    /// on the serving carrier.
     pub fn observe_signal(&mut self, earfcn: u32, rsrp: Option<f32>, rsrq: Option<f32>) {
         let Some(current) = self.current.as_mut() else {
             return;
@@ -280,6 +292,19 @@ mod tests {
         // A measurement for the serving EARFCN is applied.
         tracker.observe_signal(2050, Some(-102.9), None);
         assert_eq!(tracker.current().unwrap().rsrp, Some(-102.9));
+    }
+
+    #[test]
+    fn test_carrier_change_clears_stale_signal() {
+        let mut tracker = ServingCellTracker::new();
+        tracker.observe_physical(160, 2050);
+        tracker.observe_signal(2050, Some(-95.0), None);
+        assert_eq!(tracker.current().unwrap().rsrp, Some(-95.0));
+        // Reselect to a different EARFCN: the old cell's RSRP must be cleared.
+        tracker.observe_physical(200, 5780);
+        let cell = tracker.current().unwrap();
+        assert_eq!(cell.earfcn, Some(5780));
+        assert_eq!(cell.rsrp, None);
     }
 
     #[test]
