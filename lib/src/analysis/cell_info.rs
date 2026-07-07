@@ -10,9 +10,9 @@
 //! The physical-layer fields come from Qualcomm DIAG log packets, not RRC:
 //! EARFCN and PCI from the LTE RRC OTA log header and the LTE ML1 serving-cell
 //! measurement log (see [`ServingCellTracker::observe_physical`]). RSRP/RSRQ
-//! come from that same ML1 log (see [`ServingCellTracker::observe_signal`]) for
-//! ML1 subpacket versions whose signal layout is decoded — not yet the v18
-//! layout the MDM9207-class devices (e.g. Orbic) emit. SINR is reserved.
+//! come from that same ML1 log (see [`ServingCellTracker::observe_signal`]).
+//! RSRP is decoded for the v18 subpacket layout MDM9207-class devices (e.g. the
+//! Orbic) emit; RSRQ and SINR are not yet decoded for v18.
 
 use serde::{Deserialize, Serialize};
 
@@ -191,14 +191,19 @@ impl ServingCellTracker {
         current.earfcn = Some(earfcn);
     }
 
-    /// Record serving-cell signal measurements (RSRP/RSRQ) recovered from an
-    /// LTE ML1 measurement log, merging whichever are present into the current
-    /// cell. A no-op if both are `None`.
-    pub fn observe_signal(&mut self, rsrp: Option<f32>, rsrq: Option<f32>) {
-        if rsrp.is_none() && rsrq.is_none() {
+    /// Record serving-cell signal measurements (RSRP/RSRQ) from an LTE ML1
+    /// measurement, merging whichever are present into the current cell.
+    ///
+    /// ML1 reports measured cells including neighbors, so the measurement is
+    /// attributed to the serving cell only when its `earfcn` matches the serving
+    /// cell's (established from the RRC OTA header). A no-op otherwise.
+    pub fn observe_signal(&mut self, earfcn: u32, rsrp: Option<f32>, rsrq: Option<f32>) {
+        let Some(current) = self.current.as_mut() else {
+            return;
+        };
+        if current.earfcn != Some(earfcn) {
             return;
         }
-        let current = self.current.get_or_insert_with(ServingCellInfo::default);
         if rsrp.is_some() {
             current.rsrp = rsrp;
         }
@@ -259,6 +264,22 @@ mod tests {
         assert_eq!(cell.earfcn, Some(2050));
         // Identity fields remain unset until a SIB1 is observed.
         assert!(cell.plmn.is_none());
+    }
+
+    #[test]
+    fn test_observe_signal_matches_serving_earfcn() {
+        let mut tracker = ServingCellTracker::new();
+        // No serving cell yet: signal is dropped.
+        tracker.observe_signal(2050, Some(-95.0), None);
+        assert!(tracker.current().is_none());
+        // Establish the serving cell at EARFCN 2050.
+        tracker.observe_physical(160, 2050);
+        // A neighbor measurement (different EARFCN) must not touch the cell.
+        tracker.observe_signal(5780, Some(-70.0), None);
+        assert_eq!(tracker.current().unwrap().rsrp, None);
+        // A measurement for the serving EARFCN is applied.
+        tracker.observe_signal(2050, Some(-102.9), None);
+        assert_eq!(tracker.current().unwrap().rsrp, Some(-102.9));
     }
 
     #[test]

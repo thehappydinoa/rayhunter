@@ -559,8 +559,7 @@ impl Harness {
                 ..
             } => {
                 if let Some(m) = ml1::ServingCellMeasurement::parse(body) {
-                    self.serving_cell.observe_physical(m.pci, m.earfcn);
-                    self.serving_cell.observe_signal(m.rsrp, m.rsrq);
+                    self.serving_cell.observe_signal(m.earfcn, m.rsrp, m.rsrq);
                 }
             }
             _ => {}
@@ -847,27 +846,33 @@ mod tests {
     }
 
     #[test]
-    fn test_harness_records_ml1_serving_cell() {
+    fn test_harness_records_ml1_rsrp_for_serving_cell() {
         use crate::diag::diaglog::{LogBody, Timestamp};
-        // A real Orbic 0xB193 subpacket-v18 frame: EARFCN 700, PCI 64. v18 has
-        // no reverse-engineered RSRP layout, so signal stays unset.
-        let body = vec![
-            0x01, 0x01, 0x4a, 0xe0, 0x19, 0x12, 0x60, 0x00, 0xbc, 0x02, 0x00, 0x00, 0x40, 0x10,
-            0x00, 0x00,
-        ];
-        let message = Message::Log {
+        // The RRC OTA header establishes the serving cell (EARFCN 2050).
+        let (_, rrc) = crate::diag::diaglog::test::get_test_message(&[
+            0x40, 0x1, 0xee, 0xad, 0xd5, 0x4d, 0xd0,
+        ]);
+        // A 0xB193 v18 frame for the same EARFCN with RSRP raw 1234 -> -102.875 dBm.
+        let mut ml1_body = vec![0u8; 44];
+        ml1_body[0] = 1; // outer version
+        ml1_body[1] = 1; // num_subpackets
+        ml1_body[4] = 25; // subpacket id
+        ml1_body[5] = 18; // subpacket version
+        ml1_body[8..12].copy_from_slice(&2050u32.to_le_bytes()); // sp+0 earfcn
+        ml1_body[40..44].copy_from_slice(&1234u32.to_le_bytes()); // sp+32 rsrp raw
+        let ml1 = Message::Log {
             pending_msgs: 0,
             outer_length: 0,
             inner_length: 0,
             log_type: 0xb193,
             timestamp: Timestamp { ts: 0 },
-            body: LogBody::LteMl1ServingCellMeas { body },
+            body: LogBody::LteMl1ServingCellMeas { body: ml1_body },
         };
         let mut harness = Harness::new();
-        let _ = harness.analyze_qmdl_message(Ok(message));
+        let _ = harness.analyze_qmdl_message(Ok(rrc));
+        let _ = harness.analyze_qmdl_message(Ok(ml1));
         let cell = harness.current_serving_cell().expect("cell recorded");
-        assert_eq!(cell.earfcn, Some(700));
-        assert_eq!(cell.pci, Some(64));
-        assert_eq!(cell.rsrp, None);
+        assert_eq!(cell.earfcn, Some(2050));
+        assert!((cell.rsrp.expect("rsrp") - (-102.875)).abs() < 0.01);
     }
 }

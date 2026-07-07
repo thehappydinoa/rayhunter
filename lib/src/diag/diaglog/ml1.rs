@@ -12,34 +12,34 @@
 //! [8:]         subpacket data
 //! ```
 //!
-//! Note this is a *different* log from `0xB17F` ("Serving Cell Meas and Eval"),
+//! This is a *different* log from `0xB17F` ("Serving Cell Meas and Eval"),
 //! which has a flat, non-subpacketed layout.
 //!
-//! The **subpacket version** — not the outer version — selects the field
-//! layout, and layouts differ substantially between chipsets. Only versions
-//! validated against a real capture are decoded; any other returns `None` so an
-//! unrecognized layout fails safe rather than emitting bogus values.
+//! The **subpacket version** selects the field layout, and layouts differ
+//! substantially between chipsets. Only versions validated against a real
+//! capture are decoded; any other returns `None` so an unrecognized layout
+//! fails safe rather than emitting bogus values.
 //!
-//! - **v18** (MDM9207; e.g. the Orbic RC400L): the serving cell is inline in the
-//!   carrier header — EARFCN at `sp+0` (low 18 bits), serving PCI at `sp+4` (low
-//!   9 bits). Confirmed against a real Orbic frame (EARFCN 700, PCI 64). The
-//!   RSRP/RSRQ field layout for v18 is **not yet reverse-engineered** — it can't
-//!   be located from a stationary capture (the field is indistinguishable from
-//!   constant look-alikes without a wide RSRP sweep correlated to ground truth),
-//!   so `rsrp`/`rsrq` are `None`. See the `diaggrok` project's `0xB193` notes.
+//! - **v18** (MDM9207; e.g. the Orbic RC400L): EARFCN at `sp+0` (low 18 bits)
+//!   and RSRP at `sp+32` (low 12 bits, `-180 + raw/16` dBm). The RSRP field and
+//!   scaling were reverse-engineered and validated to r=0.999 over a 28 dB range
+//!   by time-aligned correlation against `0xB17F` v5 ground truth (which the
+//!   same modem emits with a known, decodable layout). Each frame reports one
+//!   *measured* cell (serving or neighbor), identified by its EARFCN — the
+//!   caller attributes RSRP to the serving cell only on an EARFCN match. RSRQ
+//!   is not yet located for v18.
 
 /// The serving-cell measurement subpacket id within `0xB193`.
 const SUBPACKET_ID_SERVING_CELL_MEAS: u8 = 25;
 
-/// Serving-cell physical-layer measurements decoded from a `0xB193` packet.
-/// `earfcn`/`pci` are populated for any known subpacket version; `rsrp`/`rsrq`
-/// are `Some` only for versions whose signal-field layout has been decoded.
+/// A single measured-cell record decoded from a `0xB193` packet. `earfcn`
+/// identifies which cell the measurement is for (may be a neighbor, not the
+/// serving cell). `rsrp`/`rsrq` are `Some` only for versions whose signal-field
+/// layout has been decoded.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ServingCellMeasurement {
-    /// E-UTRA Absolute Radio Frequency Channel Number of the serving cell.
+    /// E-UTRA Absolute Radio Frequency Channel Number the measurement is for.
     pub earfcn: u32,
-    /// Physical Cell Identity (0..503).
-    pub pci: u16,
     /// Reference Signal Received Power, in dBm.
     pub rsrp: Option<f32>,
     /// Reference Signal Received Quality, in dB.
@@ -60,7 +60,6 @@ impl ServingCellMeasurement {
     /// byte). Returns `None` for non-serving-cell subpackets, unsupported
     /// subpacket versions, or truncated data.
     pub fn parse(body: &[u8]) -> Option<Self> {
-        // Outer header is 8 bytes; subpacket data follows.
         let subpacket_id = *body.get(4)?;
         let subpacket_version = *body.get(5)?;
         let sp = body.get(8..)?;
@@ -75,15 +74,14 @@ impl ServingCellMeasurement {
         }
     }
 
-    /// v18 (MDM9207): serving EARFCN (low 18 bits) at `sp+0`, serving PCI (low 9
-    /// bits) at `sp+4`. RSRP/RSRQ not yet located for this version.
+    /// v18 (MDM9207): EARFCN (low 18 bits) at `sp+0`, RSRP (low 12 bits,
+    /// `-180 + raw/16` dBm) at `sp+32`.
     fn parse_subpacket_v18(sp: &[u8]) -> Option<Self> {
         let earfcn = u32_le(sp, 0)? & 0x3_ffff;
-        let pci = (u32_le(sp, 4)? & 0x1ff) as u16;
+        let rsrp = -180.0 + (u32_le(sp, 32)? & 0xfff) as f32 * 0.0625;
         Some(Self {
             earfcn,
-            pci,
-            rsrp: None,
+            rsrp: Some(rsrp),
             rsrq: None,
         })
     }
@@ -94,28 +92,29 @@ mod tests {
     use super::*;
 
     // A real 0xB193 body captured from an Orbic RC400L (MDM9207): outer version
-    // 1, subpacket id 25, subpacket version 18 (0x12), EARFCN 700, PCI 64.
+    // 1, subpacket id 25, subpacket version 18. Measured cell EARFCN 5780, RSRP
+    // raw 1583 -> -81.06 dBm (cross-validated against 0xB17F).
     fn orbic_v18_body() -> Vec<u8> {
         vec![
-            0x01, 0x01, 0x4a, 0xe0, 0x19, 0x12, 0x60, 0x00, // outer header
-            0xbc, 0x02, 0x00, 0x00, // sp+0: earfcn = 0x2bc = 700
-            0x40, 0x10, 0x00, 0x00, // sp+4: 0x1040 -> pci low9 = 64
+            0x01, 0x01, 0xea, 0xe0, 0x19, 0x12, 0x60, 0x00, // outer header
+            0x94, 0x16, 0x00, 0x00, // sp+0: earfcn = 0x1694 = 5780
+            0x40, 0x10, 0x00, 0x00, 0xf9, 0x0c, 0x00, 0x00, 0xcc, 0xa5, 0x00, 0x00, 0xe6, 0x52,
+            0xc8, 0x07, 0xf9, 0xbc, 0x18, 0x00, 0x2f, 0xf6, 0x5c, 0x00, 0xcf, 0xf5, 0x62, 0x00,
+            0x2f, 0x06, 0x16, 0x58, // sp+32: 0x5816062f, low12 = 1583 = RSRP raw
         ]
     }
 
     #[test]
     fn parses_orbic_v18() {
         let m = ServingCellMeasurement::parse(&orbic_v18_body()).expect("v18 parses");
-        assert_eq!(m.earfcn, 700);
-        assert_eq!(m.pci, 64);
-        // v18 RSRP/RSRQ layout is not yet reverse-engineered.
-        assert_eq!(m.rsrp, None);
+        assert_eq!(m.earfcn, 5780);
+        // 1583 / 16 - 180 = -81.0625
+        assert!((m.rsrp.expect("rsrp") - (-81.0625)).abs() < 0.01);
         assert_eq!(m.rsrq, None);
     }
 
     #[test]
     fn unsupported_subpacket_version_is_none() {
-        // A serving-cell subpacket with an unknown version must fail safe.
         let mut b = orbic_v18_body();
         b[5] = 59; // an as-yet-unimplemented version
         assert!(ServingCellMeasurement::parse(&b).is_none());
