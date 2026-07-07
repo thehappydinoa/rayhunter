@@ -3,6 +3,7 @@ use log::debug;
 use pcap_file_tokio::pcapng::blocks::enhanced_packet::EnhancedPacketBlock;
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
+use std::fmt::Write as _;
 
 use crate::analysis::diagnostic::DiagnosticAnalyzer;
 use crate::diag::{DiagParsingError, Message};
@@ -582,15 +583,19 @@ impl Harness {
         // analyzers, so an event emitted on the same SIB1 that establishes the
         // cell identity is stamped with it.
         self.serving_cell.observe(ie);
-        let current_cell = self.serving_cell.current();
+        // Borrow (don't clone) the serving cell: most messages produce no event,
+        // so we only clone it into an event on the rare path where one fires.
+        let current_cell = self.serving_cell.current_ref();
+        let packet_num = self.packet_num;
 
-        let packet_str = format!(" (packet {})", self.packet_num);
         self.analyzers
             .iter_mut()
             .map(|analyzer| {
-                let mut maybe_event = analyzer.analyze_information_element(ie, self.packet_num);
+                let mut maybe_event = analyzer.analyze_information_element(ie, packet_num);
                 if let Some(ref mut event) = maybe_event {
-                    event.message.push_str(&packet_str);
+                    // Build the "(packet N)" suffix only when an event fires,
+                    // appending in place to avoid a per-message allocation.
+                    let _ = write!(event.message, " (packet {packet_num})");
                     // Stamp structured context centrally so individual analyzers
                     // don't have to. An analyzer may still set its own cell (e.g.
                     // for a neighbor rather than the serving cell); respect that.
@@ -599,7 +604,7 @@ impl Harness {
                         version: analyzer.get_version(),
                     });
                     if event.cell.is_none()
-                        && let Some(cell) = &current_cell
+                        && let Some(cell) = current_cell
                         && !cell.is_empty()
                     {
                         event.cell = Some(cell.clone());

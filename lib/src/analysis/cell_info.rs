@@ -177,6 +177,13 @@ impl ServingCellTracker {
         self.current.clone()
     }
 
+    /// A borrow of the most recently observed serving cell. Used on the
+    /// per-message analysis hot path to avoid cloning when no event fires;
+    /// callers needing an owned value use [`current`](Self::current).
+    pub fn current_ref(&self) -> Option<&ServingCellInfo> {
+        self.current.as_ref()
+    }
+
     /// Every distinct PLMN observed so far, in a stable order.
     pub fn observed_plmns(&self) -> impl Iterator<Item = &Plmn> {
         self.observed_plmns.iter()
