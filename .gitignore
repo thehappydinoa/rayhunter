@@ -1,4 +1,6 @@
 /target
 /book
 .DS_Store
+.vscode/
+.playwright-mcp/
 /tools/build-wpa-supplicant
