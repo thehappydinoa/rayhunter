@@ -13,6 +13,7 @@
   - [Rayhunter's heuristics](./heuristics.md)
   - [Re-analyzing recordings](./reanalyzing.md)
   - [How we analyze a capture](./analyzing-a-capture.md)
+  - [SIM states: what you can capture](./sim-states.md)
 - [Supported devices](./supported-devices.md)
   - [Porting to new devices](./porting.md)
   - [Orbic/Kajeet RC400L](./orbic.md)
