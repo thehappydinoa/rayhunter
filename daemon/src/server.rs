@@ -150,41 +150,50 @@ pub async fn get_qmdl_slice(
         ));
     }
 
-    let qmdl_store = state.qmdl_store_lock.read().await;
-    let (entry_index, _) = if qmdl_name == "live" {
-        qmdl_store.get_current_entry().ok_or((
-            StatusCode::SERVICE_UNAVAILABLE,
-            "No active recording to slice, try starting a new recording!".to_string(),
-        ))?
-    } else {
-        let name = qmdl_name.trim_end_matches(".qmdl");
-        qmdl_store.entry_for_name(name).ok_or((
-            StatusCode::NOT_FOUND,
-            format!("couldn't find qmdl file with name {name}"),
-        ))?
-    };
+    // Resolve the entry and open the file, then release the store lock BEFORE
+    // the (potentially long) decode. The DIAG recorder takes the store write
+    // lock on every incoming container, so holding a read lock across a
+    // full-file gzip decode would stall recording.
+    let mut reader = {
+        let qmdl_store = state.qmdl_store_lock.read().await;
+        let (entry_index, _) = if qmdl_name == "live" {
+            qmdl_store.get_current_entry().ok_or((
+                StatusCode::SERVICE_UNAVAILABLE,
+                "No active recording to slice, try starting a new recording!".to_string(),
+            ))?
+        } else {
+            let name = qmdl_name.trim_end_matches(".qmdl");
+            qmdl_store.entry_for_name(name).ok_or((
+                StatusCode::NOT_FOUND,
+                format!("couldn't find qmdl file with name {name}"),
+            ))?
+        };
 
-    let qmdl_file = qmdl_store
-        .open_file(entry_index, FileKind::Qmdl)
-        .await
-        .map_err(|err| {
+        let qmdl_file = qmdl_store
+            .open_file(entry_index, FileKind::Qmdl)
+            .await
+            .map_err(|err| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("error opening QMDL file: {err}"),
+                )
+            })?
+            .ok_or((StatusCode::NOT_FOUND, "QMDL file not found".to_string()))?;
+        QmdlMessageReader::new(qmdl_file).await.map_err(|err| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                format!("error opening QMDL file: {err}"),
+                format!("error reading QMDL file: {err}"),
             )
         })?
-        .ok_or((StatusCode::NOT_FOUND, "QMDL file not found".to_string()))?;
-    let mut reader = QmdlMessageReader::new(qmdl_file).await.map_err(|err| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("error reading QMDL file: {err}"),
-        )
-    })?;
+        // read guard dropped here
+    };
 
     // Collect the raw frames of every message timestamped within the window.
     // Untimestamped frames (e.g. control responses) are included only while we
     // are already inside the window, so the slice stays contiguous. Messages
-    // are chronological, so we can stop once we pass the end of the window.
+    // are chronological, so we can stop once we pass the end of the window. The
+    // window is attacker-controlled, so the buffered result is size-capped to
+    // avoid exhausting memory on the device.
     let mut out: Vec<u8> = Vec::new();
     let mut inside_window = false;
     loop {
@@ -207,9 +216,9 @@ pub async fn get_qmdl_slice(
                     Some(ts) if ts > params.end_ms => break,
                     Some(_) => {
                         inside_window = true;
-                        out.extend_from_slice(&raw);
+                        push_capped(&mut out, &raw)?;
                     }
-                    None if inside_window => out.extend_from_slice(&raw),
+                    None if inside_window => push_capped(&mut out, &raw)?,
                     None => {}
                 }
             }
@@ -218,6 +227,30 @@ pub async fn get_qmdl_slice(
 
     let headers = [(CONTENT_TYPE, "application/octet-stream")];
     Ok((headers, out).into_response())
+}
+
+/// Upper bound on a buffered QMDL slice response, to keep an unbounded time
+/// window from exhausting the device's memory.
+const MAX_QMDL_SLICE_BYTES: usize = 64 * 1024 * 1024;
+
+/// Append a frame to the slice buffer, erroring with 413 if the cap is exceeded.
+fn push_capped(out: &mut Vec<u8>, raw: &[u8]) -> Result<(), (StatusCode, String)> {
+    push_capped_with_limit(out, raw, MAX_QMDL_SLICE_BYTES)
+}
+
+fn push_capped_with_limit(
+    out: &mut Vec<u8>,
+    raw: &[u8],
+    limit: usize,
+) -> Result<(), (StatusCode, String)> {
+    if out.len().saturating_add(raw.len()) > limit {
+        return Err((
+            StatusCode::PAYLOAD_TOO_LARGE,
+            format!("qmdl slice exceeds the {limit}-byte limit; request a narrower time window"),
+        ));
+    }
+    out.extend_from_slice(raw);
+    Ok(())
 }
 
 pub async fn serve_static(
@@ -678,6 +711,21 @@ mod tests {
         qmdl::{QmdlMessageReader, QmdlWriter},
     };
     use tempfile::TempDir;
+
+    #[test]
+    fn push_capped_enforces_limit() {
+        let mut out = Vec::new();
+        // Frames that fit are appended.
+        assert!(push_capped_with_limit(&mut out, &[0u8; 6], 10).is_ok());
+        assert_eq!(out.len(), 6);
+        // A frame that would exceed the cap is rejected and does not grow it.
+        let err = push_capped_with_limit(&mut out, &[0u8; 5], 10).unwrap_err();
+        assert_eq!(err.0, StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(out.len(), 6);
+        // A frame that exactly reaches the cap is allowed.
+        assert!(push_capped_with_limit(&mut out, &[0u8; 4], 10).is_ok());
+        assert_eq!(out.len(), 10);
+    }
 
     async fn create_test_qmdl_store() -> (TempDir, Arc<RwLock<crate::qmdl_store::RecordingStore>>) {
         let temp_dir = TempDir::new().unwrap();
