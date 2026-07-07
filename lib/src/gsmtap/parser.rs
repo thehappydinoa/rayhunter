@@ -153,6 +153,9 @@ fn log_to_gsmtap(value: LogBody) -> Result<Option<GsmtapMessage>, GsmtapParserEr
                 payload: msg,
             }))
         }
+        // Physical-layer measurement logs carry no gsmtap payload; they are
+        // consumed directly by the analysis harness, so drop them quietly.
+        LogBody::LteMl1ServingCellMeas { .. } => Ok(None),
         _ => {
             error!("gsmtap_sink: ignoring unhandled log type: {value:?}");
             Ok(None)

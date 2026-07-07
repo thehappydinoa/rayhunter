@@ -40,7 +40,7 @@ pub enum DiagDeviceError {
     ParseMessagesContainerError(deku::DekuError),
 }
 
-pub const LOG_CODES_FOR_RAW_PACKET_LOGGING: [u32; 11] = [
+pub const LOG_CODES_FOR_RAW_PACKET_LOGGING: [u32; 12] = [
     // Layer 2:
     log_codes::LOG_GPRS_MAC_SIGNALLING_MESSAGE_C, // 0x5226
     // Layer 3:
@@ -48,6 +48,8 @@ pub const LOG_CODES_FOR_RAW_PACKET_LOGGING: [u32; 11] = [
     log_codes::WCDMA_SIGNALLING_MESSAGE,       // 0x412f
     log_codes::LOG_LTE_RRC_OTA_MSG_LOG_C,      // 0xb0c0
     log_codes::LOG_NR_RRC_OTA_MSG_LOG_C,       // 0xb821
+    // Physical-layer measurements:
+    log_codes::LOG_LTE_ML1_SERVING_CELL_MEAS_C, // 0xb193
     // NAS:
     log_codes::LOG_UMTS_NAS_OTA_MESSAGE_LOG_PACKET_C, // 0x713a
     log_codes::LOG_LTE_NAS_ESM_OTA_IN_MSG_LOG_C,      // 0xb0e2

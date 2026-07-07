@@ -6,7 +6,7 @@ use std::borrow::Cow;
 use std::fmt::Write as _;
 
 use crate::analysis::diagnostic::DiagnosticAnalyzer;
-use crate::diag::diaglog::LogBody;
+use crate::diag::diaglog::{LogBody, ml1};
 use crate::diag::{DiagParsingError, Message};
 use crate::gsmtap::{GsmtapHeader, GsmtapMessage, GsmtapType};
 use crate::util::RuntimeMetadata;
@@ -542,17 +542,27 @@ impl Harness {
             }
         };
 
-        // Record physical-layer serving-cell context (PCI/EARFCN) from the RRC
-        // OTA log header before gsmtap parsing consumes the message. This is
-        // available even when the RRC payload itself fails to decode, and the
-        // gsmtap path would otherwise drop it (PCI) or truncate it (EARFCN).
-        if let Message::Log {
-            body: LogBody::LteRrcOtaMessage { packet, .. },
-            ..
-        } = &qmdl_message
-        {
-            self.serving_cell
-                .observe_physical(packet.get_phy_cell_id(), packet.get_earfcn());
+        // Record physical-layer serving-cell context from the raw log packet
+        // before gsmtap parsing consumes the message. This is available even
+        // when an RRC payload fails to decode, and the gsmtap path would
+        // otherwise drop it (PCI), truncate it (EARFCN), or ignore it (ML1).
+        match &qmdl_message {
+            Message::Log {
+                body: LogBody::LteRrcOtaMessage { packet, .. },
+                ..
+            } => {
+                self.serving_cell
+                    .observe_physical(packet.get_phy_cell_id(), packet.get_earfcn());
+            }
+            Message::Log {
+                body: LogBody::LteMl1ServingCellMeas { body },
+                ..
+            } => {
+                if let Some(m) = ml1::ServingCellMeasurement::parse(body) {
+                    self.serving_cell.observe_signal(m.rsrp, m.rsrq);
+                }
+            }
+            _ => {}
         }
 
         let gsmtap_message = match gsmtap_parser::parse(qmdl_message) {
@@ -833,5 +843,31 @@ mod tests {
             .expect("serving cell recorded from RRC OTA header");
         assert_eq!(cell.pci, Some(160));
         assert_eq!(cell.earfcn, Some(2050));
+    }
+
+    #[test]
+    fn test_harness_records_signal_measurements() {
+        use crate::diag::diaglog::{LogBody, Timestamp};
+        // A version-4 0xB193 body decoding to rsrp -90, rsrq -10.
+        let mut body = vec![0u8; 32];
+        body[0] = 4;
+        body[4..6].copy_from_slice(&2050u16.to_le_bytes());
+        body[6..8].copy_from_slice(&(160u16 << 7).to_le_bytes());
+        body[8..12].copy_from_slice(&1440u32.to_le_bytes());
+        body[16..20].copy_from_slice(&(320u32 << 22).to_le_bytes());
+        body[20..24].copy_from_slice(&(640u32 << 11).to_le_bytes());
+        let message = Message::Log {
+            pending_msgs: 0,
+            outer_length: 0,
+            inner_length: 0,
+            log_type: 0xb193,
+            timestamp: Timestamp { ts: 0 },
+            body: LogBody::LteMl1ServingCellMeas { body },
+        };
+        let mut harness = Harness::new();
+        let _ = harness.analyze_qmdl_message(Ok(message));
+        let cell = harness.current_serving_cell().expect("cell recorded");
+        assert!((cell.rsrp.expect("rsrp") - (-90.0)).abs() < 0.01);
+        assert!((cell.rsrq.expect("rsrq") - (-10.0)).abs() < 0.01);
     }
 }

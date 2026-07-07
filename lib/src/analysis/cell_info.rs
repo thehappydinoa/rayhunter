@@ -8,9 +8,10 @@
 //! The identity fields ([`Plmn`], TAC, cell id, band) are recovered from the
 //! LTE RRC SIB1 broadcast, which is already decoded by the analysis pipeline.
 //! The physical-layer fields come from Qualcomm DIAG log packets, not RRC:
-//! EARFCN and PCI are populated from the LTE RRC OTA log header (see
-//! [`ServingCellTracker::observe_physical`]); RSRP/RSRQ/SINR are reserved and
-//! populated by a later change.
+//! EARFCN and PCI from the LTE RRC OTA log header (see
+//! [`ServingCellTracker::observe_physical`]), and RSRP/RSRQ from the LTE ML1
+//! serving-cell measurement log (see [`ServingCellTracker::observe_signal`]).
+//! SINR is reserved and populated by a later change.
 
 use serde::{Deserialize, Serialize};
 
@@ -187,6 +188,14 @@ impl ServingCellTracker {
         let current = self.current.get_or_insert_with(ServingCellInfo::default);
         current.pci = Some(pci);
         current.earfcn = Some(earfcn);
+    }
+
+    /// Record serving-cell signal measurements (RSRP/RSRQ) recovered from an
+    /// LTE ML1 measurement log, merging them into the current cell.
+    pub fn observe_signal(&mut self, rsrp: f32, rsrq: f32) {
+        let current = self.current.get_or_insert_with(ServingCellInfo::default);
+        current.rsrp = Some(rsrp);
+        current.rsrq = Some(rsrq);
     }
 
     /// The most recently observed serving cell, if any.
