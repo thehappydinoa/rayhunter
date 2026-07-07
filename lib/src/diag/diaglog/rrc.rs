@@ -99,6 +99,15 @@ impl LteRrcOtaPacket {
         }
     }
 
+    pub fn get_phy_cell_id(&self) -> u16 {
+        match self {
+            LteRrcOtaPacket::V0 { phy_cell_id, .. } => *phy_cell_id,
+            LteRrcOtaPacket::V5 { phy_cell_id, .. } => *phy_cell_id,
+            LteRrcOtaPacket::V8 { phy_cell_id, .. } => *phy_cell_id,
+            LteRrcOtaPacket::V25 { phy_cell_id, .. } => *phy_cell_id,
+        }
+    }
+
     pub fn take_payload(self) -> Vec<u8> {
         match self {
             LteRrcOtaPacket::V0 { packet, .. } => packet,

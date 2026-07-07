@@ -6,6 +6,7 @@ use std::borrow::Cow;
 use std::fmt::Write as _;
 
 use crate::analysis::diagnostic::DiagnosticAnalyzer;
+use crate::diag::diaglog::LogBody;
 use crate::diag::{DiagParsingError, Message};
 use crate::gsmtap::{GsmtapHeader, GsmtapMessage, GsmtapType};
 use crate::util::RuntimeMetadata;
@@ -540,6 +541,20 @@ impl Harness {
                 return row;
             }
         };
+
+        // Record physical-layer serving-cell context (PCI/EARFCN) from the RRC
+        // OTA log header before gsmtap parsing consumes the message. This is
+        // available even when the RRC payload itself fails to decode, and the
+        // gsmtap path would otherwise drop it (PCI) or truncate it (EARFCN).
+        if let Message::Log {
+            body: LogBody::LteRrcOtaMessage { packet, .. },
+            ..
+        } = &qmdl_message
+        {
+            self.serving_cell
+                .observe_physical(packet.get_phy_cell_id(), packet.get_earfcn());
+        }
+
         let gsmtap_message = match gsmtap_parser::parse(qmdl_message) {
             Ok(msg) => msg,
             Err(err) => {
@@ -801,5 +816,22 @@ mod tests {
         assert!(event.cell.is_none());
         // The central packet-number suffix is still appended.
         assert!(event.message.contains("packet"));
+    }
+
+    #[test]
+    fn test_harness_records_physical_cell_context() {
+        // A raw LTE RRC OTA log packet carries PCI/EARFCN in its header. The
+        // harness records them onto the serving cell from the header, even
+        // though this synthetic payload does not decode as valid RRC.
+        let (_, message) = crate::diag::diaglog::test::get_test_message(&[
+            0x40, 0x1, 0xee, 0xad, 0xd5, 0x4d, 0xd0,
+        ]);
+        let mut harness = Harness::new();
+        let _ = harness.analyze_qmdl_message(Ok(message));
+        let cell = harness
+            .current_serving_cell()
+            .expect("serving cell recorded from RRC OTA header");
+        assert_eq!(cell.pci, Some(160));
+        assert_eq!(cell.earfcn, Some(2050));
     }
 }

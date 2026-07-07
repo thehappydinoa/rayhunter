@@ -7,9 +7,10 @@
 //!
 //! The identity fields ([`Plmn`], TAC, cell id, band) are recovered from the
 //! LTE RRC SIB1 broadcast, which is already decoded by the analysis pipeline.
-//! The physical-layer fields (EARFCN, PCI, RSRP/RSRQ/SINR) come from Qualcomm
-//! DIAG log packets that the RRC layer does not carry; they are reserved here
-//! and populated by a later change.
+//! The physical-layer fields come from Qualcomm DIAG log packets, not RRC:
+//! EARFCN and PCI are populated from the LTE RRC OTA log header (see
+//! [`ServingCellTracker::observe_physical`]); RSRP/RSRQ/SINR are reserved and
+//! populated by a later change.
 
 use serde::{Deserialize, Serialize};
 
@@ -70,7 +71,7 @@ pub struct ServingCellInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub band: Option<u16>,
 
-    // --- Physical-layer context (reserved; sourced from DIAG log packets) ---
+    // --- Physical-layer context (sourced from DIAG log packets, not RRC) ---
     /// Serving E-UTRA Absolute Radio Frequency Channel Number.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub earfcn: Option<u32>,
@@ -161,15 +162,31 @@ impl ServingCellTracker {
         Self::default()
     }
 
-    /// Update the tracked serving cell from an information element. A no-op for
-    /// elements that do not carry cell identity.
+    /// Update the tracked serving cell's identity from an information element.
+    /// A no-op for elements that do not carry cell identity. Physical-layer
+    /// fields (PCI/EARFCN/signal) recorded via [`observe_physical`](Self::observe_physical)
+    /// are preserved rather than overwritten.
     pub fn observe(&mut self, ie: &InformationElement) {
         if let Some(info) = ServingCellInfo::from_information_element(ie) {
             if let Some(plmn) = &info.plmn {
                 self.observed_plmns.insert(plmn.clone());
             }
-            self.current = Some(info);
+            let current = self.current.get_or_insert_with(ServingCellInfo::default);
+            current.plmn = info.plmn;
+            current.tac = info.tac;
+            current.cell_id = info.cell_id;
+            current.band = info.band;
         }
+    }
+
+    /// Record physical-layer serving-cell context (PCI and EARFCN) recovered
+    /// from a DIAG LTE RRC OTA log header. These arrive on RRC packets
+    /// independently of the SIB1 that carries the cell identity, so they are
+    /// merged into the current cell rather than replacing it.
+    pub fn observe_physical(&mut self, pci: u16, earfcn: u32) {
+        let current = self.current.get_or_insert_with(ServingCellInfo::default);
+        current.pci = Some(pci);
+        current.earfcn = Some(earfcn);
     }
 
     /// The most recently observed serving cell, if any.
@@ -210,6 +227,20 @@ mod tests {
             }
             .is_empty()
         );
+    }
+
+    #[test]
+    fn test_observe_physical_records_pci_earfcn() {
+        let mut tracker = ServingCellTracker::new();
+        assert!(tracker.current().is_none());
+        tracker.observe_physical(160, 2050);
+        let cell = tracker
+            .current()
+            .expect("cell created by physical observation");
+        assert_eq!(cell.pci, Some(160));
+        assert_eq!(cell.earfcn, Some(2050));
+        // Identity fields remain unset until a SIB1 is observed.
+        assert!(cell.plmn.is_none());
     }
 
     #[test]
