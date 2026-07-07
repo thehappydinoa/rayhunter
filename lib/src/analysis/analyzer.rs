@@ -559,6 +559,7 @@ impl Harness {
                 ..
             } => {
                 if let Some(m) = ml1::ServingCellMeasurement::parse(body) {
+                    self.serving_cell.observe_physical(m.pci, m.earfcn);
                     self.serving_cell.observe_signal(m.rsrp, m.rsrq);
                 }
             }
@@ -846,16 +847,14 @@ mod tests {
     }
 
     #[test]
-    fn test_harness_records_signal_measurements() {
+    fn test_harness_records_ml1_serving_cell() {
         use crate::diag::diaglog::{LogBody, Timestamp};
-        // A version-4 0xB193 body decoding to rsrp -90, rsrq -10.
-        let mut body = vec![0u8; 32];
-        body[0] = 4;
-        body[4..6].copy_from_slice(&2050u16.to_le_bytes());
-        body[6..8].copy_from_slice(&(160u16 << 7).to_le_bytes());
-        body[8..12].copy_from_slice(&1440u32.to_le_bytes());
-        body[16..20].copy_from_slice(&(320u32 << 22).to_le_bytes());
-        body[20..24].copy_from_slice(&(640u32 << 11).to_le_bytes());
+        // A real Orbic 0xB193 subpacket-v18 frame: EARFCN 700, PCI 64. v18 has
+        // no reverse-engineered RSRP layout, so signal stays unset.
+        let body = vec![
+            0x01, 0x01, 0x4a, 0xe0, 0x19, 0x12, 0x60, 0x00, 0xbc, 0x02, 0x00, 0x00, 0x40, 0x10,
+            0x00, 0x00,
+        ];
         let message = Message::Log {
             pending_msgs: 0,
             outer_length: 0,
@@ -867,7 +866,8 @@ mod tests {
         let mut harness = Harness::new();
         let _ = harness.analyze_qmdl_message(Ok(message));
         let cell = harness.current_serving_cell().expect("cell recorded");
-        assert!((cell.rsrp.expect("rsrp") - (-90.0)).abs() < 0.01);
-        assert!((cell.rsrq.expect("rsrq") - (-10.0)).abs() < 0.01);
+        assert_eq!(cell.earfcn, Some(700));
+        assert_eq!(cell.pci, Some(64));
+        assert_eq!(cell.rsrp, None);
     }
 }
