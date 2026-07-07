@@ -467,6 +467,23 @@ impl Harness {
         self.serving_cell.current()
     }
 
+    /// A display summary of the operator(s) seen during this run, derived from
+    /// the distinct serving-cell PLMNs observed (e.g. "T-Mobile US (United
+    /// States)"). Returns `None` if no PLMN has been observed yet. Multiple
+    /// operators are joined with ", ".
+    pub fn observed_carrier(&self) -> Option<String> {
+        let names: std::collections::BTreeSet<String> = self
+            .serving_cell
+            .observed_plmns()
+            .map(|plmn| plmn.display_name())
+            .collect();
+        if names.is_empty() {
+            None
+        } else {
+            Some(names.into_iter().collect::<Vec<_>>().join(", "))
+        }
+    }
+
     pub fn analyze_pcap_packet(&mut self, packet: EnhancedPacketBlock) -> AnalysisRow {
         self.packet_num += 1;
 

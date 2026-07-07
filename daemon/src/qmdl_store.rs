@@ -125,6 +125,11 @@ pub struct ManifestEntry {
     pub gps_mode: Option<GpsMode>,
     #[serde(default)]
     pub compressed: bool,
+    /// A display summary of the mobile operator(s) observed during the
+    /// recording, derived from the serving-cell PLMNs seen in the capture
+    /// (e.g. "T-Mobile US (United States)"). `None` until a PLMN is observed.
+    #[serde(default)]
+    pub carrier: Option<String>,
 }
 
 impl ManifestEntry {
@@ -143,6 +148,7 @@ impl ManifestEntry {
             upload_time: None,
             gps_mode: Some(gps_mode),
             compressed: true,
+            carrier: None,
         }
     }
 
@@ -272,6 +278,7 @@ impl RecordingStore {
                 stop_reason: None,
                 upload_time: None,
                 gps_mode: None,
+                carrier: None,
             });
         }
 
@@ -462,6 +469,41 @@ impl RecordingStore {
     ) -> Result<(), RecordingStoreError> {
         if let Some(idx) = self.current_entry {
             self.manifest.entries[idx].stop_reason = Some(reason);
+            self.write_manifest().await?;
+        }
+        Ok(())
+    }
+
+    /// Set the observed-carrier summary on the current entry, persisting only
+    /// if it changed (the live path calls this once per container).
+    pub async fn set_current_entry_carrier(
+        &mut self,
+        carrier: String,
+    ) -> Result<(), RecordingStoreError> {
+        if let Some(idx) = self.current_entry
+            && self.manifest.entries[idx].carrier.as_deref() != Some(carrier.as_str())
+        {
+            self.manifest.entries[idx].carrier = Some(carrier);
+            self.write_manifest().await?;
+        }
+        Ok(())
+    }
+
+    /// Set the observed-carrier summary on the entry with the given name
+    /// (used by the offline re-analysis worker).
+    pub async fn set_entry_carrier(
+        &mut self,
+        name: &str,
+        carrier: String,
+    ) -> Result<(), RecordingStoreError> {
+        let entry_index = self
+            .manifest
+            .entries
+            .iter()
+            .position(|entry| entry.name == name)
+            .ok_or(RecordingStoreError::NoSuchEntryError)?;
+        if self.manifest.entries[entry_index].carrier.as_deref() != Some(carrier.as_str()) {
+            self.manifest.entries[entry_index].carrier = Some(carrier);
             self.write_manifest().await?;
         }
         Ok(())

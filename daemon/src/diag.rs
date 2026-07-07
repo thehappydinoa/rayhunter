@@ -456,6 +456,14 @@ impl DiagTask {
                 *self.last_cell.write().await = Some(cell);
             }
 
+            // Record the observed operator(s) on the manifest entry. The store
+            // only rewrites the manifest when the value actually changes.
+            if let Some(carrier) = analysis_writer.observed_carrier()
+                && let Err(e) = qmdl_store.set_current_entry_carrier(carrier).await
+            {
+                warn!("failed to update carrier in manifest: {e}");
+            }
+
             if max_type > EventType::Informational {
                 info!("a heuristic triggered on this run!");
                 self.notification_channel

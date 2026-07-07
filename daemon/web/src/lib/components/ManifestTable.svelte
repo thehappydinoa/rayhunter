@@ -20,6 +20,7 @@
                 <th class="p-2" scope="col">ID</th>
                 <th class="p-2" scope="col">Started</th>
                 <th class="p-2" scope="col">Last Message</th>
+                <th class="p-2" scope="col">Carrier</th>
                 <th class="p-2" scope="col">Size</th>
                 <th class="p-2" scope="col">Download</th>
                 <th class="p-2" scope="col">Analysis</th>

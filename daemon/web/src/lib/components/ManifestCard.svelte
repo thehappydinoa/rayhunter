@@ -80,6 +80,7 @@
                 date_formatter.format(entry.last_message_time)) ||
                 'N/A'}</span
         >
+        <span class="">Carrier: {entry.carrier || 'N/A'}</span>
     </div>
     {#if entry.stop_reason}
         <div class="bg-yellow-50 border border-yellow-300 rounded-sm p-2 text-yellow-800 text-sm">

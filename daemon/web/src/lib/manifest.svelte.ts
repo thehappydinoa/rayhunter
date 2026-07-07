@@ -15,6 +15,7 @@ interface JsonManifestEntry {
     stop_reason: string | null;
     upload_time: string | null;
     gps_mode: GpsMode | null;
+    carrier: string | null;
 }
 
 export class Manifest {
@@ -64,6 +65,7 @@ export class ManifestEntry {
     public stop_reason: string | undefined = $state(undefined);
     public upload_time: Date | undefined = $state(undefined);
     public gps_mode: GpsMode | undefined = $state(undefined);
+    public carrier: string | undefined = $state(undefined);
 
     constructor(json: JsonManifestEntry) {
         this.name = json.name;
@@ -80,6 +82,9 @@ export class ManifestEntry {
         }
         if (json.gps_mode !== null) {
             this.gps_mode = json.gps_mode;
+        }
+        if (json.carrier) {
+            this.carrier = json.carrier;
         }
     }
 

@@ -6,7 +6,7 @@ use axum::{
     extract::{Path, State},
     http::StatusCode,
 };
-use log::{error, info};
+use log::{error, info, warn};
 use rayhunter::analysis::analyzer::{AnalyzerConfig, EventType, Harness, Position};
 
 use crate::events::{EventSender, LiveEvent};
@@ -57,6 +57,12 @@ impl AnalysisWriter {
     /// The most recently observed serving cell for this recording, if any.
     pub fn current_serving_cell(&self) -> Option<rayhunter::analysis::cell_info::ServingCellInfo> {
         self.harness.current_serving_cell()
+    }
+
+    /// A display summary of the operator(s) observed during this recording,
+    /// derived from the serving-cell PLMNs seen. `None` until a PLMN is seen.
+    pub fn observed_carrier(&self) -> Option<String> {
+        self.harness.observed_carrier()
     }
 
     /// Publish each warning event in a written row to SSE subscribers. Skips
@@ -226,10 +232,21 @@ async fn perform_analysis(
             .map_err(|e| format!("{e:?}"))?;
     }
 
+    // Capture the observed operator(s) before `close` consumes the writer, then
+    // persist it to the recording's manifest entry.
+    let carrier = analysis_writer.observed_carrier();
+
     analysis_writer
         .close()
         .await
         .map_err(|e| format!("{e:?}"))?;
+
+    if let Some(carrier) = carrier {
+        let mut qmdl_store = qmdl_store_lock.write().await;
+        if let Err(e) = qmdl_store.set_entry_carrier(name, carrier).await {
+            warn!("failed to persist carrier for {name}: {e:?}");
+        }
+    }
     info!("Analysis for {name} complete!");
 
     Ok(())

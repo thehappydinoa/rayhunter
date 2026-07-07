@@ -42,6 +42,7 @@
     <td class="p-2"
         >{(entry.last_message_time && date_formatter.format(entry.last_message_time)) || 'N/A'}</td
     >
+    <td class="p-2">{entry.carrier || 'N/A'}</td>
     <td class="p-2">{entry.get_readable_qmdl_size()}</td>
     <td class="p-2">
         <div class="flex flex-row gap-2">

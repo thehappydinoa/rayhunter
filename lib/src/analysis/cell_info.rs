@@ -25,13 +25,29 @@ use super::information_element::{InformationElement, LteInformationElement};
 /// Stored as digit strings rather than integers so leading zeros (which are
 /// significant in an MNC, e.g. MNC "01" is distinct from "1") and the MNC's
 /// 2-vs-3-digit width are preserved losslessly.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 #[cfg_attr(feature = "apidocs", derive(utoipa::ToSchema))]
 pub struct Plmn {
     /// Mobile Country Code, always 3 digits, e.g. "310".
     pub mcc: String,
     /// Mobile Network Code, 2 or 3 digits, e.g. "410" or "01".
     pub mnc: String,
+}
+
+impl Plmn {
+    /// Resolve this PLMN to a named operator/country via the curated
+    /// [`mcc_mnc`](super::mcc_mnc) table.
+    pub fn carrier(&self) -> super::mcc_mnc::Carrier {
+        super::mcc_mnc::lookup(&self.mcc, &self.mnc)
+    }
+
+    /// A human-readable label for this PLMN, always non-empty: the resolved
+    /// operator/country if known, otherwise the raw `MCC-MNC` digits.
+    pub fn display_name(&self) -> String {
+        self.carrier()
+            .display()
+            .unwrap_or_else(|| format!("{}-{}", self.mcc, self.mnc))
+    }
 }
 
 /// Structured identity and radio context of a serving cell, as much of it as
@@ -135,6 +151,9 @@ fn digits_to_string(digits: impl Iterator<Item = u8>) -> String {
 #[derive(Default)]
 pub struct ServingCellTracker {
     current: Option<ServingCellInfo>,
+    /// Every distinct PLMN seen over the life of the capture, in a stable
+    /// order. Used to summarize which operator(s) the run observed.
+    observed_plmns: std::collections::BTreeSet<Plmn>,
 }
 
 impl ServingCellTracker {
@@ -146,6 +165,9 @@ impl ServingCellTracker {
     /// elements that do not carry cell identity.
     pub fn observe(&mut self, ie: &InformationElement) {
         if let Some(info) = ServingCellInfo::from_information_element(ie) {
+            if let Some(plmn) = &info.plmn {
+                self.observed_plmns.insert(plmn.clone());
+            }
             self.current = Some(info);
         }
     }
@@ -153,6 +175,11 @@ impl ServingCellTracker {
     /// The most recently observed serving cell, if any.
     pub fn current(&self) -> Option<ServingCellInfo> {
         self.current.clone()
+    }
+
+    /// Every distinct PLMN observed so far, in a stable order.
+    pub fn observed_plmns(&self) -> impl Iterator<Item = &Plmn> {
+        self.observed_plmns.iter()
     }
 }
 
