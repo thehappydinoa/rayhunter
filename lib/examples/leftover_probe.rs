@@ -43,6 +43,12 @@ async fn main() {
     let mut tail_unparseable = 0usize;
     let mut matches_outer_inner_gap = 0usize;
     let mut samples: Vec<String> = Vec::new();
+    // Characterize parse errors by decapsulated length: empty frames and frames
+    // too short to form any Message are benign padding; longer ones are notable.
+    let mut perr_empty = 0usize;
+    let mut perr_short = 0usize; // 1..12 bytes: can't form a Log or Response
+    let mut perr_long = 0usize; // >=12 bytes: should have parsed
+    let mut perr_samples: Vec<String> = Vec::new();
 
     for path in &paths {
         let file = match File::open(path).await {
@@ -73,6 +79,22 @@ async fn main() {
                 Ok(v) => v,
                 Err(_) => {
                     parse_errors += 1;
+                    match data.len() {
+                        0 => perr_empty += 1,
+                        1..=11 => perr_short += 1,
+                        _ => {
+                            perr_long += 1;
+                            if perr_samples.len() < 8 {
+                                let head: Vec<String> =
+                                    data.iter().take(16).map(|b| format!("{b:02x}")).collect();
+                                perr_samples.push(format!(
+                                    "len={} bytes: {}",
+                                    data.len(),
+                                    head.join(" ")
+                                ));
+                            }
+                        }
+                    }
                     continue;
                 }
             };
@@ -136,7 +158,15 @@ async fn main() {
     let pct = 100.0 * leftover_frames as f64 / frames.max(1) as f64;
     println!("=== QMDL leftover-bytes probe: {} file(s) ===", paths.len());
     println!("frames parsed:              {frames}");
-    println!("frame parse errors:        {parse_errors}");
+    println!(
+        "frame parse errors:        {parse_errors} (empty={perr_empty}, short<12B={perr_short}, >=12B={perr_long})"
+    );
+    if !perr_samples.is_empty() {
+        println!("  >=12B parse-error samples:");
+        for s in &perr_samples {
+            println!("    {s}");
+        }
+    }
     println!("frames with leftover:      {leftover_frames} ({pct:.2}%)");
     println!("total leftover bytes:      {leftover_bytes_total}");
     println!("first-msg type of leftover frames: {first_msg_types:?}");
