@@ -166,11 +166,23 @@ pub struct ServingCellTracker {
     /// scan/neighbor glimpses can be told apart from where the device actually
     /// camped. `BTreeMap` keeps a stable order for ties.
     observed_plmns: std::collections::BTreeMap<Plmn, usize>,
+    /// The SIM's own home network (the MCC/MNC from its IMSI), if known —
+    /// typically read from the modem at startup. When this operator is among
+    /// those observed, [`carrier_summary`](Self::carrier_summary) leads with it
+    /// and tags it "(home)", distinguishing the SIM's carrier from other
+    /// networks the device merely scanned.
+    home_plmn: Option<Plmn>,
 }
 
 impl ServingCellTracker {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Record the SIM's home network (from its IMSI), so
+    /// [`carrier_summary`](Self::carrier_summary) can mark it. `None` clears it.
+    pub fn set_home_plmn(&mut self, plmn: Option<Plmn>) {
+        self.home_plmn = plmn;
     }
 
     /// Update the tracked serving cell's identity from an information element.
@@ -245,16 +257,19 @@ impl ServingCellTracker {
         self.current.as_ref()
     }
 
-    /// A compact "primary carrier (+N others)" summary of the operators seen in
-    /// this capture, or `None` if no named carrier was observed.
+    /// A compact summary of the operators seen in this capture, or `None` if no
+    /// named carrier was observed.
     ///
-    /// PLMNs are ranked by how often they were the serving cell. The most-seen
-    /// named operator is the primary; each *other* operator whose share of
-    /// sightings clears [`CARRIER_SIGNIFICANT_SHARE`] adds one to the `+N`
-    /// count. Rare transient sightings (e.g. a neighbor glimpsed during a scan)
-    /// fall below that floor and are ignored, so a normal single-network capture
-    /// reads as just the carrier name while a scanning SIM that genuinely camped
-    /// on several networks reads as e.g. "T-Mobile US (United States) +2".
+    /// PLMNs are ranked by how often they were the serving cell. The primary
+    /// (leading) operator is the SIM's home network if it's known and was
+    /// observed — tagged "(home)" regardless of how dominant it was — otherwise
+    /// the most-seen operator. Each *other* operator whose share of sightings
+    /// clears [`CARRIER_SIGNIFICANT_SHARE`] adds one to a `+N` count; rare
+    /// transient sightings (e.g. a neighbor glimpsed during a scan) fall below
+    /// that floor and are ignored. So a normal single-network capture reads as
+    /// just the carrier name, a scanning SIM reads as e.g.
+    /// "T-Mobile US (United States) (home) +2", and a capture with no known home
+    /// reads as e.g. "AT&T (United States) +2".
     ///
     /// Fully-unknown PLMNs (no operator *or* country) are excluded; a
     /// country-only PLMN still counts (it renders as "Unknown operator (X)").
@@ -265,25 +280,41 @@ impl ServingCellTracker {
         }
         // Named/known PLMNs ranked by sightings (desc), then PLMN for stable
         // tie-breaking.
-        let mut ranked: Vec<(&Plmn, usize)> = self
+        let mut named: Vec<(&Plmn, usize)> = self
             .observed_plmns
             .iter()
             .filter(|(plmn, _)| plmn.carrier().display().is_some())
             .map(|(plmn, &count)| (plmn, count))
             .collect();
-        ranked.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
-
-        let (primary_plmn, _) = ranked.first()?;
-        let primary = primary_plmn.display_name();
-        let others = ranked[1..]
-            .iter()
-            .filter(|(_, count)| *count as f64 / total as f64 >= CARRIER_SIGNIFICANT_SHARE)
-            .count();
-        if others == 0 {
-            Some(primary)
-        } else {
-            Some(format!("{primary} +{others}"))
+        if named.is_empty() {
+            return None;
         }
+        named.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+
+        // Lead with the home network if we know it and saw it this capture
+        // (even if it wasn't the most-seen); otherwise the most-seen operator.
+        let home_seen = self
+            .home_plmn
+            .as_ref()
+            .filter(|home| named.iter().any(|(p, _)| p == home));
+        let (primary_plmn, home_tag): (&Plmn, &str) = match home_seen {
+            Some(home) => (home, " (home)"),
+            None => (named[0].0, ""),
+        };
+        let primary = primary_plmn.display_name();
+
+        // Count the *other* operators with a meaningful presence.
+        let others = named
+            .iter()
+            .filter(|(p, count)| {
+                *p != primary_plmn && *count as f64 / total as f64 >= CARRIER_SIGNIFICANT_SHARE
+            })
+            .count();
+        Some(if others == 0 {
+            format!("{primary}{home_tag}")
+        } else {
+            format!("{primary}{home_tag} +{others}")
+        })
     }
 }
 
@@ -339,6 +370,53 @@ mod tests {
             t.carrier_summary().as_deref(),
             Some("T-Mobile US (United States)")
         );
+    }
+
+    #[test]
+    fn carrier_summary_marks_home_and_counts_others() {
+        let mut t = ServingCellTracker::new();
+        t.observed_plmns.insert(plmn("310", "260"), 62887); // T-Mobile (home)
+        t.observed_plmns.insert(plmn("310", "410"), 60719); // AT&T
+        t.observed_plmns.insert(plmn("311", "480"), 26797); // Verizon
+        t.observed_plmns.insert(plmn("310", "830"), 113); // 0.1% noise
+        t.set_home_plmn(Some(plmn("310", "260")));
+        assert_eq!(
+            t.carrier_summary().as_deref(),
+            Some("T-Mobile US (United States) (home) +2")
+        );
+    }
+
+    #[test]
+    fn carrier_summary_leads_with_home_even_when_not_dominant() {
+        // Home is only 20% here; AT&T dominates. Home must still lead.
+        let mut t = ServingCellTracker::new();
+        t.observed_plmns.insert(plmn("310", "410"), 800); // AT&T, dominant
+        t.observed_plmns.insert(plmn("310", "260"), 200); // T-Mobile (home)
+        t.set_home_plmn(Some(plmn("310", "260")));
+        assert_eq!(
+            t.carrier_summary().as_deref(),
+            Some("T-Mobile US (United States) (home) +1")
+        );
+    }
+
+    #[test]
+    fn carrier_summary_home_only() {
+        let mut t = ServingCellTracker::new();
+        t.observed_plmns.insert(plmn("310", "260"), 100);
+        t.set_home_plmn(Some(plmn("310", "260")));
+        assert_eq!(
+            t.carrier_summary().as_deref(),
+            Some("T-Mobile US (United States) (home)")
+        );
+    }
+
+    #[test]
+    fn carrier_summary_home_not_observed_falls_back_to_dominant() {
+        // We know the home network but never saw it this capture: no "(home)".
+        let mut t = ServingCellTracker::new();
+        t.observed_plmns.insert(plmn("310", "410"), 100); // AT&T only
+        t.set_home_plmn(Some(plmn("310", "260"))); // T-Mobile, unseen
+        assert_eq!(t.carrier_summary().as_deref(), Some("AT&T (United States)"));
     }
 
     #[test]

@@ -15,7 +15,7 @@ use crate::{diag::MessagesContainer, gsmtap::parser as gsmtap_parser};
 use super::{
     attach_reject_storm::AttachRejectStormAnalyzer,
     auth_anomaly::AuthAnomalyAnalyzer,
-    cell_info::{ServingCellInfo, ServingCellTracker},
+    cell_info::{Plmn, ServingCellInfo, ServingCellTracker},
     connection_redirect_downgrade::ConnectionRedirect2GDowngradeAnalyzer,
     imsi_paging::ImsiPagingAnalyzer,
     imsi_requested::ImsiRequestedAnalyzer,
@@ -469,10 +469,17 @@ impl Harness {
         self.serving_cell.current()
     }
 
-    /// A display summary of the operator(s) seen during this run: the dominant
-    /// serving-cell carrier, plus a "+N" count of other operators with a
-    /// meaningful presence (e.g. "T-Mobile US (United States) +2"). Returns
-    /// `None` if no named carrier has been observed. See
+    /// Record the SIM's home network (from its IMSI) so that
+    /// [`observed_carrier`](Self::observed_carrier) can mark it as "(home)".
+    pub fn set_home_plmn(&mut self, plmn: Option<Plmn>) {
+        self.serving_cell.set_home_plmn(plmn);
+    }
+
+    /// A display summary of the operator(s) seen during this run: the primary
+    /// carrier — the SIM's home network (tagged "(home)") if known and observed,
+    /// else the dominant one — plus a "+N" count of other operators with a
+    /// meaningful presence (e.g. "T-Mobile US (United States) (home) +2").
+    /// Returns `None` if no named carrier has been observed. See
     /// [`ServingCellTracker::carrier_summary`](super::cell_info::ServingCellTracker::carrier_summary).
     pub fn observed_carrier(&self) -> Option<String> {
         self.serving_cell.carrier_summary()
