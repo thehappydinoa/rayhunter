@@ -87,12 +87,9 @@
                 </p>
             </div>
             {#if metadata && metadata.analyzers}
-                <div>
-                    <p class="text-lg underline">Enabled Analyzers</p>
-                    {#each metadata.analyzers as analyzer}
-                        <p><b>{analyzer.name}:</b> {analyzer.description}</p>
-                    {/each}
-                </div>
+                <p class="text-sm text-gray-500 mt-1">
+                    {metadata.analyzers.length} analyzers active
+                </p>
             {/if}
         </div>
     {/if}
