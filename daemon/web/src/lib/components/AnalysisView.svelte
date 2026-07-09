@@ -4,6 +4,7 @@
     import { gps_mode_label } from '$lib/utils.svelte';
     import { AnalysisManager } from '$lib/analysisManager.svelte';
     import AnalysisTable from './AnalysisTable.svelte';
+    import AnalysisSummary from './AnalysisSummary.svelte';
     import ReAnalyzeButton from './ReAnalyzeButton.svelte';
     let {
         entry,
@@ -14,6 +15,8 @@
         manager: AnalysisManager;
         current: boolean;
     } = $props();
+
+    let show_details = $state(false);
 
     const date_formatter = new Intl.DateTimeFormat(undefined, {
         timeStyle: 'long',
@@ -50,10 +53,17 @@
                     {/if}
                 </div>
             {/if}
+            <AnalysisSummary report={entry.analysis_report} {current} />
             {#if entry.analysis_report.rows.length > 0}
-                <AnalysisTable report={entry.analysis_report} />
-            {:else}
-                <p>No warnings to display!</p>
+                <button
+                    class="mt-2 cursor-pointer text-lg underline text-left"
+                    onclick={() => (show_details = !show_details)}
+                >
+                    {show_details ? '▾' : '▸'} Technical Details
+                </button>
+                {#if show_details}
+                    <AnalysisTable report={entry.analysis_report} />
+                {/if}
             {/if}
             <div>
                 <p class="text-lg underline">Metadata</p>
