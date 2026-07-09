@@ -147,6 +147,12 @@ fn digits_to_string(digits: impl Iterator<Item = u8>) -> String {
     digits.map(|d| char::from(b'0' + d)).collect()
 }
 
+/// Minimum share of serving-cell sightings a *secondary* operator must reach to
+/// be counted in [`carrier_summary`](ServingCellTracker::carrier_summary)'s
+/// "+N". Below this, an operator is treated as a transient scan/neighbor glimpse
+/// rather than a network the device meaningfully camped on.
+const CARRIER_SIGNIFICANT_SHARE: f64 = 0.05;
+
 /// Tracks the most recently observed serving cell across a stream of
 /// information elements. The [`Harness`](super::analyzer::Harness) feeds every
 /// IE through [`observe`](Self::observe) so that events can be stamped with the
@@ -154,9 +160,12 @@ fn digits_to_string(digits: impl Iterator<Item = u8>) -> String {
 #[derive(Default)]
 pub struct ServingCellTracker {
     current: Option<ServingCellInfo>,
-    /// Every distinct PLMN seen over the life of the capture, in a stable
-    /// order. Used to summarize which operator(s) the run observed.
-    observed_plmns: std::collections::BTreeSet<Plmn>,
+    /// How many times each distinct PLMN was seen as the serving cell over the
+    /// life of the capture (one count per SIB1 sighting). Used to summarize the
+    /// operator(s) the run observed, ranked by dominance so transient
+    /// scan/neighbor glimpses can be told apart from where the device actually
+    /// camped. `BTreeMap` keeps a stable order for ties.
+    observed_plmns: std::collections::BTreeMap<Plmn, usize>,
 }
 
 impl ServingCellTracker {
@@ -171,7 +180,7 @@ impl ServingCellTracker {
     pub fn observe(&mut self, ie: &InformationElement) {
         if let Some(info) = ServingCellInfo::from_information_element(ie) {
             if let Some(plmn) = &info.plmn {
-                self.observed_plmns.insert(plmn.clone());
+                *self.observed_plmns.entry(plmn.clone()).or_default() += 1;
             }
             let current = self.current.get_or_insert_with(ServingCellInfo::default);
             current.plmn = info.plmn;
@@ -236,15 +245,113 @@ impl ServingCellTracker {
         self.current.as_ref()
     }
 
-    /// Every distinct PLMN observed so far, in a stable order.
-    pub fn observed_plmns(&self) -> impl Iterator<Item = &Plmn> {
-        self.observed_plmns.iter()
+    /// A compact "primary carrier (+N others)" summary of the operators seen in
+    /// this capture, or `None` if no named carrier was observed.
+    ///
+    /// PLMNs are ranked by how often they were the serving cell. The most-seen
+    /// named operator is the primary; each *other* operator whose share of
+    /// sightings clears [`CARRIER_SIGNIFICANT_SHARE`] adds one to the `+N`
+    /// count. Rare transient sightings (e.g. a neighbor glimpsed during a scan)
+    /// fall below that floor and are ignored, so a normal single-network capture
+    /// reads as just the carrier name while a scanning SIM that genuinely camped
+    /// on several networks reads as e.g. "T-Mobile US (United States) +2".
+    ///
+    /// Fully-unknown PLMNs (no operator *or* country) are excluded; a
+    /// country-only PLMN still counts (it renders as "Unknown operator (X)").
+    pub fn carrier_summary(&self) -> Option<String> {
+        let total: usize = self.observed_plmns.values().sum();
+        if total == 0 {
+            return None;
+        }
+        // Named/known PLMNs ranked by sightings (desc), then PLMN for stable
+        // tie-breaking.
+        let mut ranked: Vec<(&Plmn, usize)> = self
+            .observed_plmns
+            .iter()
+            .filter(|(plmn, _)| plmn.carrier().display().is_some())
+            .map(|(plmn, &count)| (plmn, count))
+            .collect();
+        ranked.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+
+        let (primary_plmn, _) = ranked.first()?;
+        let primary = primary_plmn.display_name();
+        let others = ranked[1..]
+            .iter()
+            .filter(|(_, count)| *count as f64 / total as f64 >= CARRIER_SIGNIFICANT_SHARE)
+            .count();
+        if others == 0 {
+            Some(primary)
+        } else {
+            Some(format!("{primary} +{others}"))
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn plmn(mcc: &str, mnc: &str) -> Plmn {
+        Plmn {
+            mcc: mcc.to_string(),
+            mnc: mnc.to_string(),
+        }
+    }
+
+    #[test]
+    fn carrier_summary_none_when_no_plmns() {
+        assert_eq!(ServingCellTracker::new().carrier_summary(), None);
+    }
+
+    #[test]
+    fn carrier_summary_single_carrier_has_no_suffix() {
+        let mut t = ServingCellTracker::new();
+        t.observed_plmns.insert(plmn("310", "260"), 100);
+        assert_eq!(
+            t.carrier_summary().as_deref(),
+            Some("T-Mobile US (United States)")
+        );
+    }
+
+    #[test]
+    fn carrier_summary_ranks_primary_and_counts_significant_others() {
+        // Real distribution from a scanning unactivated SIM: three major
+        // carriers, plus one 0.1% noise sighting that must be dropped.
+        let mut t = ServingCellTracker::new();
+        t.observed_plmns.insert(plmn("310", "260"), 62887); // T-Mobile, 41.8%
+        t.observed_plmns.insert(plmn("310", "410"), 60719); // AT&T, 40.3%
+        t.observed_plmns.insert(plmn("311", "480"), 26797); // Verizon, 17.8%
+        t.observed_plmns.insert(plmn("310", "830"), 113); // 0.1% noise
+        assert_eq!(
+            t.carrier_summary().as_deref(),
+            Some("T-Mobile US (United States) +2")
+        );
+    }
+
+    #[test]
+    fn carrier_summary_drops_below_floor_others() {
+        // A second carrier seen only rarely (< 5%) is a transient glimpse, not
+        // a "+1".
+        let mut t = ServingCellTracker::new();
+        t.observed_plmns.insert(plmn("310", "260"), 990);
+        t.observed_plmns.insert(plmn("310", "410"), 10); // 1%
+        assert_eq!(
+            t.carrier_summary().as_deref(),
+            Some("T-Mobile US (United States)")
+        );
+    }
+
+    #[test]
+    fn carrier_summary_ignores_fully_unknown_plmn() {
+        // A country-less test PLMN resolves to nothing and must not appear.
+        let mut t = ServingCellTracker::new();
+        t.observed_plmns.insert(plmn("310", "260"), 50);
+        t.observed_plmns.insert(plmn("001", "01"), 50);
+        assert_eq!(
+            t.carrier_summary().as_deref(),
+            Some("T-Mobile US (United States)")
+        );
+    }
 
     #[test]
     fn test_digits_to_string() {
